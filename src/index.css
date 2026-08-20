@@ -1,0 +1,142 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --bg-app: #F2F2F7;
+    --bg-panel: rgba(255, 255, 255, 0.65);
+    --bg-input: rgba(118, 118, 128, 0.12);
+    --border-color: rgba(60, 60, 67, 0.15);
+    --text-primary: #000000;
+    --text-secondary: rgba(60, 60, 67, 0.6);
+    --accent-color: #007AFF;
+    --accent-hover: #0056b3;
+    --shadow-color: rgba(0, 0, 0, 0.05);
+  }
+  
+  .dark {
+    --bg-app: #000000;
+    --bg-panel: rgba(28, 28, 30, 0.55);
+    --bg-input: rgba(118, 118, 128, 0.24);
+    --border-color: rgba(255, 255, 255, 0.1);
+    --text-primary: #FFFFFF;
+    --text-secondary: rgba(235, 235, 245, 0.6);
+    --accent-color: #0A84FF;
+    --accent-hover: #60A5FA;
+    --shadow-color: rgba(0, 0, 0, 0.4);
+  }
+}
+
+@theme {
+  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "SF Pro Hebrew", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: "SF Mono", ui-monospace, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  --color-theme-bg: var(--bg-app);
+  --color-theme-panel: var(--bg-panel);
+  --color-theme-input: var(--bg-input);
+  --color-theme-border: var(--border-color);
+  --color-theme-text: var(--text-primary);
+  --color-theme-text-muted: var(--text-secondary);
+  --color-theme-accent: var(--accent-color);
+  --color-theme-accent-hover: var(--accent-hover);
+}
+
+body {
+  font-family: var(--font-sans);
+  background-color: var(--bg-app);
+  color: var(--text-primary);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Hyper-realistic Apple VisionOS / iOS 18 Glass Effect */
+.glass-panel {
+  background: var(--bg-panel);
+  backdrop-filter: blur(48px) saturate(200%);
+  -webkit-backdrop-filter: blur(48px) saturate(200%);
+  border: 1px solid var(--border-color);
+  box-shadow: 0 8px 32px var(--shadow-color), inset 0 1px 0 rgba(255, 255, 255, 0.2);
+}
+
+.dark .glass-panel {
+  box-shadow: 0 8px 32px var(--shadow-color), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+
+.ios-shadow {
+  box-shadow: 0 10px 40px -10px var(--shadow-color), 0 2px 10px -2px rgba(0,0,0,0.05);
+}
+
+/* iOS Spring/Bouncy Scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(142, 142, 147, 0.5);
+  border-radius: 10px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(142, 142, 147, 0.8);
+}
+
+/* Ambient Background Mesh Gradient */
+.ambient-bg {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100vh;
+  z-index: -1;
+  overflow: hidden;
+  background-color: var(--bg-app);
+}
+
+.ambient-bg::before,
+.ambient-bg::after {
+  content: '';
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(120px);
+  opacity: 0.6;
+  animation: float-bg 20s ease-in-out infinite alternate;
+}
+
+.ambient-bg::before {
+  top: -10%;
+  left: -10%;
+  width: 60vw;
+  height: 60vw;
+  background: radial-gradient(circle, rgba(0, 122, 255, 0.2) 0%, transparent 70%);
+}
+
+.ambient-bg::after {
+  bottom: -10%;
+  right: -10%;
+  width: 50vw;
+  height: 50vw;
+  background: radial-gradient(circle, rgba(52, 199, 89, 0.15) 0%, transparent 70%);
+  animation-delay: -10s;
+}
+
+.dark .ambient-bg::before {
+  background: radial-gradient(circle, rgba(10, 132, 255, 0.3) 0%, transparent 70%);
+}
+.dark .ambient-bg::after {
+  background: radial-gradient(circle, rgba(94, 92, 230, 0.25) 0%, transparent 70%);
+}
+
+@keyframes float-bg {
+  0% { transform: translate(0, 0) scale(1); }
+  100% { transform: translate(5%, 10%) scale(1.1); }
+}
+
+/* Report Custom Typography iOS style */
+.report-markdown h1, .report-markdown h2, .report-markdown h3 {
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+.report-markdown table {
+  border-radius: 14px;
+}

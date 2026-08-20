@@ -1,0 +1,6 @@
+{
+  "name": "מערכת סקרי שוק נדל״ן 360",
+  "description": "מערכת חכמה לביצוע סקרי שוק נדל\"ן מקיפים 360 מעלות בישראל, המאחדת נתוני עסקאות, היצע דירות, נתוני הלמ\"ס ומכרזי קרקעות בעזרת בינה מלאכותית.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
