@@ -64,10 +64,48 @@ function median(nums: number[]): number {
   return s.length % 2 ? s[m] : Math.round((s[m - 1] + s[m]) / 2);
 }
 
+/**
+ * מטמון תוצאות — החיסכון העיקרי בעלות.
+ *
+ * כל קריאה ל-Apify עולה כסף, ומחירי נדל"ן אינם משתנים תוך שעות. שמירת
+ * התוצאה לכל צירוף (אקטור + קלט) הופכת חיפוש חוזר באותה עיר לחינמי לגמרי.
+ * המטמון בזיכרון בלבד: הוא מתאפס בהפעלה מחדש של השרת, וזה מקובל — לכל
+ * היותר נשלם שוב על החיפוש הראשון.
+ */
+const CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 שעות
+const MAX_CACHE_ENTRIES = 300; // תקרה כדי שהזיכרון לא יגדל ללא הגבלה
+
+interface CacheEntry {
+  at: number;
+  rows: any[];
+}
+const resultCache = new Map<string, CacheEntry>();
+
+/** מנקה רשומות שפג תוקפן, ואם עדיין צפוף — מוחק את הישנות ביותר. */
+function pruneCache() {
+  const now = Date.now();
+  for (const [key, entry] of resultCache) {
+    if (now - entry.at > CACHE_TTL_MS) resultCache.delete(key);
+  }
+  if (resultCache.size <= MAX_CACHE_ENTRIES) return;
+  const byAge = [...resultCache.entries()].sort((a, b) => a[1].at - b[1].at);
+  for (const [key] of byAge.slice(0, resultCache.size - MAX_CACHE_ENTRIES)) {
+    resultCache.delete(key);
+  }
+}
+
 /** מריץ אקטור וממתין לתוצאות. זורק שגיאה ברורה אם הטוקן חסר או שהריצה נכשלה. */
 async function runActor(actor: string, input: unknown, timeoutMs = 240000): Promise<any[]> {
   const token = process.env.APIFY_TOKEN;
   if (!token) throw new Error("APIFY_TOKEN חסר בקובץ .env");
+
+  const cacheKey = `${actor}|${JSON.stringify(input)}`;
+  const cached = resultCache.get(cacheKey);
+  if (cached && Date.now() - cached.at < CACHE_TTL_MS) {
+    const ageMin = Math.round((Date.now() - cached.at) / 60000);
+    console.log(`[apify] מטמון: ${actor} (גיל ${ageMin} דק׳) — לא חויב`);
+    return cached.rows;
+  }
 
   const url = `${APIFY_BASE}/${actor}/run-sync-get-dataset-items?token=${encodeURIComponent(token)}`;
 
@@ -102,7 +140,15 @@ async function runActor(actor: string, input: unknown, timeoutMs = 240000): Prom
     throw new Error(`Apify ${actor} החזיר ${res.status}: ${body.slice(0, 200)}`);
   }
   const data = await res.json();
-  return Array.isArray(data) ? data : [];
+  const rows = Array.isArray(data) ? data : [];
+
+  // שומרים גם תוצאה ריקה: אם המקור לא מכסה את העיר, אין טעם לשלם על
+  // אותה תשובה שוב ושוב באותו יום.
+  resultCache.set(cacheKey, { at: Date.now(), rows });
+  pruneCache();
+  console.log(`[apify] חויב: ${actor} — ${rows.length} תוצאות`);
+
+  return rows;
 }
 
 export interface SourceResult {

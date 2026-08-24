@@ -6,15 +6,45 @@ import { createServer as createViteServer } from "vite";
 import { GoogleGenAI } from "@google/genai";
 import dotenv from "dotenv";
 import { fetchYad2, fetchYad1, fetchMadlan, fetchFacebook } from "./apifySources";
+import { verifyCredentials, changePassword, currentUser, isUsingDefaultPassword } from "./serverAuth";
 
 // Load environment variables
 dotenv.config();
 
 const app = express();
-const PORT = 3000;
+// שירותי אירוח (Render וכו') מקצים את הפורט דרך משתנה סביבה.
+const PORT = Number(process.env.PORT) || 3000;
 
 // Enable JSON body parsing with reasonable limit
 app.use(express.json({ limit: "20mb" }));
+
+/**
+ * CORS — האתר הסטטי (GitHub Pages) והשרת יושבים בדומיינים שונים,
+ * ובלי ההרשאה הזו הדפדפן חוסם כל קריאה ל-API.
+ * ALLOWED_ORIGINS מאפשר לצמצם לדומיינים שלך; ברירת המחדל פתוחה כי
+ * אין כאן סודות משתמש — הטוקן נשאר בשרת ולא נחשף בתשובות.
+ */
+const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  if (!ALLOWED_ORIGINS.length) {
+    res.setHeader("Access-Control-Allow-Origin", "*");
+  } else if (origin && ALLOWED_ORIGINS.includes(origin)) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Vary", "Origin");
+  }
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  if (req.method === "OPTIONS") {
+    res.sendStatus(204);
+    return;
+  }
+  next();
+});
 
 // Configure file uploads in memory
 const upload = multer({
@@ -710,6 +740,67 @@ app.post("/api/analyze-omni", async (req, res) => {
     console.error("Error in analyze-omni:", error);
     res.status(500).json({ error: error.message || "שגיאה בתהליך שאיבת הנתונים ועיבוד הדוח מול ה-AI." });
   }
+});
+
+/**
+ * התחברות ושינוי סיסמה.
+ *
+ * מגבלת קצב פשוטה לפי כתובת IP — בלעדיה אפשר לנחש סיסמאות בלולאה.
+ * מספיק לשער כניסה של כלי פנימי; אין כאן נתונים אישיים להגן עליהם.
+ */
+const loginAttempts = new Map<string, { count: number; first: number }>();
+const LOGIN_WINDOW_MS = 10 * 60 * 1000;
+const MAX_LOGIN_ATTEMPTS = 12;
+
+function tooManyAttempts(ip: string): boolean {
+  const now = Date.now();
+  const rec = loginAttempts.get(ip);
+  if (!rec || now - rec.first > LOGIN_WINDOW_MS) {
+    loginAttempts.set(ip, { count: 1, first: now });
+    return false;
+  }
+  rec.count += 1;
+  return rec.count > MAX_LOGIN_ATTEMPTS;
+}
+
+app.post("/api/login", (req, res) => {
+  const ip = String(req.ip || req.socket.remoteAddress || "unknown");
+  if (tooManyAttempts(ip)) {
+    res.status(429).json({ ok: false, error: "יותר מדי ניסיונות. נסו שוב בעוד 10 דקות." });
+    return;
+  }
+  const { user, pass } = req.body || {};
+  if (verifyCredentials(String(user || ""), String(pass || ""))) {
+    loginAttempts.delete(ip);
+    res.json({ ok: true, usingDefaultPassword: isUsingDefaultPassword() });
+    return;
+  }
+  res.status(401).json({ ok: false, error: "שם משתמש או סיסמה שגויים." });
+});
+
+app.post("/api/change-password", (req, res) => {
+  const ip = String(req.ip || req.socket.remoteAddress || "unknown");
+  if (tooManyAttempts(ip)) {
+    res.status(429).json({ ok: false, error: "יותר מדי ניסיונות. נסו שוב בעוד 10 דקות." });
+    return;
+  }
+  const { user, currentPass, newPass } = req.body || {};
+  const result = changePassword(String(user || ""), String(currentPass || ""), String(newPass || ""));
+  if (!result.ok) {
+    res.status(400).json(result);
+    return;
+  }
+  res.json({
+    ...result,
+    // דיסק ארעי באירוח חינמי: הסיסמה תעבוד עד להפעלה מחדש של השרת.
+    note: result.persisted
+      ? undefined
+      : "הסיסמה עודכנה, אך השרת לא הצליח לשמור אותה לצמיתות — היא תחזור לברירת המחדל בהפעלה מחדש.",
+  });
+});
+
+app.get("/api/auth-info", (_req, res) => {
+  res.json({ serverAuth: true, user: currentUser(), usingDefaultPassword: isUsingDefaultPassword() });
 });
 
 /**

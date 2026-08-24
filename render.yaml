@@ -1,0 +1,28 @@
+# הגדרת שירות ל-Render. מחברים את הריפו ב-render.com ו-Render קורא את הקובץ הזה.
+# הערכים המסומנים sync:false מוזנים ידנית בלוח הבקרה — כדי שסודות לא יישבו ב-git.
+services:
+  - type: web
+    name: nadlan-360-api
+    runtime: node
+    plan: free
+    region: frankfurt # הקרוב ביותר לישראל מבין אזורי Render
+    # --include=dev חובה: tsx יושב ב-devDependencies, ועם NODE_ENV=production
+    # התקנה רגילה מדלגת עליו והשרת נופל בהפעלה.
+    buildCommand: npm install --include=dev
+    startCommand: npx tsx server.ts
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      # שאיבת יד2 / יד1 / מדלן / פייסבוק. מפיקים ב:
+      # https://console.apify.com/settings/integrations
+      - key: APIFY_TOKEN
+        sync: false
+      # פרטי הכניסה ההתחלתיים. שינוי כאן = איפוס סיסמה למצב התחלתי.
+      - key: AUTH_USER
+        sync: false
+      - key: AUTH_PASSWORD
+        sync: false
+      # מצמצם מי רשאי לקרוא ל-API. ריק = פתוח לכולם.
+      - key: ALLOWED_ORIGINS
+        value: https://chananeltz.github.io

@@ -504,6 +504,60 @@ export async function bridgeScrape(source: string, city: string, street: string)
   }
 }
 
+// ---- התחברות מול השרת ----
+
+export interface LoginResult {
+  ok: boolean;
+  error?: string;
+  /** true = השרת לא זמין ויש להשתמש בבדיקה המקומית כגיבוי. */
+  offline?: boolean;
+  usingDefaultPassword?: boolean;
+}
+
+/** מאמת מול השרת. אם השרת לא זמין מסמן offline כדי שהאתר יישאר שמיש. */
+export async function serverLogin(user: string, pass: string): Promise<LoginResult> {
+  try {
+    const r = await fetch(`${API_BASE}/api/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ user, pass }),
+      signal: AbortSignal.timeout(8000),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (r.ok && d?.ok) return { ok: true, usingDefaultPassword: d.usingDefaultPassword };
+    return { ok: false, error: d?.error || "שם משתמש או סיסמה שגויים." };
+  } catch {
+    return { ok: false, offline: true };
+  }
+}
+
+export interface ChangePasswordResult {
+  ok: boolean;
+  error?: string;
+  note?: string;
+  offline?: boolean;
+}
+
+export async function serverChangePassword(
+  user: string,
+  currentPass: string,
+  newPass: string,
+): Promise<ChangePasswordResult> {
+  try {
+    const r = await fetch(`${API_BASE}/api/change-password`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ user, currentPass, newPass }),
+      signal: AbortSignal.timeout(8000),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (r.ok && d?.ok) return { ok: true, note: d.note };
+    return { ok: false, error: d?.error || "שינוי הסיסמה נכשל." };
+  } catch {
+    return { ok: false, offline: true, error: "השרת אינו זמין — לא ניתן לשנות סיסמה כרגע." };
+  }
+}
+
 export interface MadlanAnalytics {
   source: "madlan";
   cityHebrew: string | null;

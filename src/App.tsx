@@ -42,6 +42,8 @@ import {
   bridgeScrape,
   fetchMadlanAnalytics,
   parseGushHelka,
+  serverLogin,
+  serverChangePassword,
   type Deal,
   type DealStatistics,
   type InvestmentAnalysis,
@@ -57,6 +59,7 @@ import {
  */
 const AUTH = { user: "chananel", pass: "Nadlan#360" };
 const AUTH_KEY = "nadlan360_auth";
+const AUTH_USER_KEY = "nadlan360_user";
 
 const nf = new Intl.NumberFormat("he-IL");
 const shekel = (n: number | null | undefined) =>
@@ -118,14 +121,40 @@ function LoginGate({ onSuccess }: { onSuccess: () => void }) {
   const [pass, setPass] = useState("");
   const [err, setErr] = useState(false);
 
-  function submit(e: React.FormEvent) {
+  const [busy, setBusy] = useState(false);
+  const [errText, setErrText] = useState("");
+  const [showChange, setShowChange] = useState(false);
+
+  async function submit(e: React.FormEvent) {
     e.preventDefault();
-    if (user.trim() === AUTH.user && pass === AUTH.pass) {
+    setBusy(true);
+    setErr(false);
+    setErrText("");
+
+    // השרת הוא מקור האמת. אם הוא אינו זמין (אתר סטטי ללא שרת) נופלים
+    // לבדיקה המקומית, כדי שהאתר יישאר שמיש גם בלי אירוח שרת.
+    const res = await serverLogin(user.trim(), pass);
+    setBusy(false);
+
+    if (res.ok) {
       sessionStorage.setItem(AUTH_KEY, "1");
+      sessionStorage.setItem(AUTH_USER_KEY, user.trim());
       onSuccess();
-    } else {
-      setErr(true);
+      return;
     }
+    if (res.offline) {
+      if (user.trim() === AUTH.user && pass === AUTH.pass) {
+        sessionStorage.setItem(AUTH_KEY, "1");
+        sessionStorage.setItem(AUTH_USER_KEY, user.trim());
+        onSuccess();
+        return;
+      }
+      setErr(true);
+      setErrText("שם משתמש או סיסמה שגויים.");
+      return;
+    }
+    setErr(true);
+    setErrText(res.error || "שם משתמש או סיסמה שגויים.");
   }
 
   return (
@@ -157,18 +186,103 @@ function LoginGate({ onSuccess }: { onSuccess: () => void }) {
           />
           {err && (
             <div className="text-[13px] text-rose-600 bg-rose-50 border border-rose-200 rounded-xl px-3 py-2">
-              שם משתמש או סיסמה שגויים.
+              {errText || "שם משתמש או סיסמה שגויים."}
             </div>
           )}
           <button
             type="submit"
-            className="w-full flex items-center justify-center gap-2 rounded-2xl bg-indigo-600 hover:bg-indigo-700 active:scale-[.98] text-white font-semibold py-3.5 transition shadow-lg shadow-indigo-200"
+            disabled={busy}
+            className="w-full flex items-center justify-center gap-2 rounded-2xl bg-indigo-600 hover:bg-indigo-700 active:scale-[.98] disabled:opacity-60 text-white font-semibold py-3.5 transition shadow-lg shadow-indigo-200"
           >
-            <Lock size={18} /> כניסה
+            {busy ? <Loader2 size={18} className="animate-spin" /> : <Lock size={18} />} כניסה
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setShowChange(true)}
+            className="w-full text-center text-[13px] text-slate-500 hover:text-indigo-600 transition pt-1"
+          >
+            שכחתי / שינוי סיסמה
           </button>
         </form>
+
+        {showChange && <ChangePasswordCard defaultUser={user} onClose={() => setShowChange(false)} />}
       </div>
     </div>
+  );
+}
+
+/* ---------- שינוי סיסמה ---------- */
+function ChangePasswordCard({ defaultUser, onClose }: { defaultUser: string; onClose: () => void }) {
+  const [user, setUser] = useState(defaultUser);
+  const [currentPass, setCurrentPass] = useState("");
+  const [newPass, setNewPass] = useState("");
+  const [confirmPass, setConfirmPass] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    if (newPass !== confirmPass) {
+      setMsg({ kind: "err", text: "הסיסמה החדשה ואישור הסיסמה אינם תואמים." });
+      return;
+    }
+    setBusy(true);
+    setMsg(null);
+    const res = await serverChangePassword(user.trim(), currentPass, newPass);
+    setBusy(false);
+    if (res.ok) {
+      setMsg({ kind: "ok", text: res.note || "הסיסמה עודכנה. אפשר להיכנס איתה עכשיו." });
+      setCurrentPass("");
+      setNewPass("");
+      setConfirmPass("");
+      return;
+    }
+    setMsg({ kind: "err", text: res.error || "שינוי הסיסמה נכשל." });
+  }
+
+  const field =
+    "w-full rounded-2xl bg-slate-50 border border-slate-200 px-4 py-3 outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100 transition text-[15px]";
+
+  return (
+    <form onSubmit={submit} className="glass-ios rounded-3xl p-6 space-y-3 mt-3">
+      <div className="flex items-center justify-between">
+        <h2 className="font-bold text-slate-800 text-[15px]">שינוי סיסמה</h2>
+        <button type="button" onClick={onClose} aria-label="סגור" className="text-slate-400 hover:text-slate-600">
+          <X size={17} />
+        </button>
+      </div>
+
+      <input value={user} onChange={(e) => setUser(e.target.value)} placeholder="שם משתמש" aria-label="שם משתמש" className={field} />
+      <input type="password" value={currentPass} onChange={(e) => setCurrentPass(e.target.value)} placeholder="סיסמה נוכחית" aria-label="סיסמה נוכחית" className={field} />
+      <input type="password" value={newPass} onChange={(e) => setNewPass(e.target.value)} placeholder="סיסמה חדשה (6 תווים לפחות)" aria-label="סיסמה חדשה" className={field} />
+      <input type="password" value={confirmPass} onChange={(e) => setConfirmPass(e.target.value)} placeholder="אישור סיסמה חדשה" aria-label="אישור סיסמה חדשה" className={field} />
+
+      {msg && (
+        <div
+          className={`text-[13px] rounded-xl px-3 py-2 border ${
+            msg.kind === "ok"
+              ? "text-emerald-700 bg-emerald-50 border-emerald-200"
+              : "text-rose-600 bg-rose-50 border-rose-200"
+          }`}
+        >
+          {msg.text}
+        </div>
+      )}
+
+      <button
+        type="submit"
+        disabled={busy}
+        className="w-full flex items-center justify-center gap-2 rounded-2xl bg-slate-800 hover:bg-slate-900 active:scale-[.98] disabled:opacity-60 text-white font-semibold py-3 transition"
+      >
+        {busy ? <Loader2 size={17} className="animate-spin" /> : <Lock size={17} />} עדכן סיסמה
+      </button>
+
+      <p className="text-[11.5px] text-slate-400 leading-relaxed">
+        שכחת את הסיסמה? פנה למי שמנהל את השרת — איפוס למצב ההתחלתי נעשה דרך משתני הסביבה{" "}
+        <span dir="ltr">AUTH_USER</span> / <span dir="ltr">AUTH_PASSWORD</span>.
+      </p>
+    </form>
   );
 }
 
