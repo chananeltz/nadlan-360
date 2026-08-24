@@ -42,6 +42,7 @@ import {
   bridgeScrape,
   fetchMadlanAnalytics,
   fetchCreditStatus,
+  clearLocalCache,
   parseGushHelka,
   serverLogin,
   serverChangePassword,
@@ -305,6 +306,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
   const [liveSources, setLiveSources] = useState<BridgeResult[]>([]);
   const [madlan, setMadlan] = useState<MadlanAnalytics | null>(null);
   const [credit, setCredit] = useState<CreditStatus | null>(null);
+  const [fromCache, setFromCache] = useState(false);
   const [liveLoading, setLiveLoading] = useState(false);
   const [query, setQuery] = useState("");
 
@@ -314,6 +316,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
     setLiveSources([]);
     setMadlan(null);
     setCredit(null);
+    setFromCache(false);
     // מדליקים את המחוון כבר עכשיו: בשכבה חינמית השרת נרדם וההתעוררות
     // אורכת עד חצי דקה, ובלי סימן חיים המסך נראה תקוע.
     setLiveLoading(true);
@@ -334,6 +337,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
       return;
     }
 
+    const startedAt = Date.now();
     const listings = ["yad2", "yad1", "facebook"].map((s) =>
       bridgeScrape(s, city, street).then((res) => {
         if (res && res.count) setLiveSources((prev) => [...prev.filter((p) => p.source !== res.source), res]);
@@ -345,6 +349,9 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
     });
 
     await Promise.all([...listings, analytics]);
+    // שאיבה אמיתית מ-Apify אורכת עשרות שניות; סיום מהיר פירושו שהתשובה
+    // הגיעה ממטמון ולא חויב עליה קרדיט.
+    setFromCache(Date.now() - startedAt < 4000);
     setLiveLoading(false);
   }
 
@@ -752,6 +759,12 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
                 loading={liveLoading}
                 closingPrice={stats.medianPrice}
                 closingPpsm={stats.medianPricePerSqm}
+                fromCache={fromCache}
+                onRefresh={() => {
+                  // רענון יזום: מנקים את המטמון המקומי כדי לאלץ שאיבה טרייה.
+                  clearLocalCache();
+                  runBridge(city.trim(), street.trim());
+                }}
               />
             )}
 
@@ -1153,7 +1166,11 @@ function LiveSourcesPanel({
   loading,
   closingPrice,
   closingPpsm,
+  fromCache,
+  onRefresh,
 }: {
+  fromCache?: boolean;
+  onRefresh?: () => void;
   sources: BridgeResult[];
   loading: boolean;
   closingPrice: number;
@@ -1163,12 +1180,34 @@ function LiveSourcesPanel({
     <div className="glass-ios rounded-3xl p-5">
       <div className="flex items-center gap-2 mb-1">
         <Scale size={18} className="text-indigo-500" />
-        <h3 className="font-bold text-slate-800">מחירי מבוקש חיים — יד2 · יד1 · מדלן</h3>
-        <span className="ms-2 inline-flex items-center gap-1 text-[11px] text-emerald-600">
-          <span className="w-2 h-2 rounded-full bg-emerald-500" /> גשר פעיל
-        </span>
+        <h3 className="font-bold text-slate-800">מחירי מבוקש חיים — יד2 · יד1 · פייסבוק</h3>
+        {fromCache ? (
+          <span
+            className="ms-2 inline-flex items-center gap-1 text-[11px] text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-full px-2 py-0.5"
+            title="התוצאה הגיעה ממטמון של 24 שעות — לא חויב קרדיט"
+          >
+            ⚡ מהמטמון · ללא חיוב
+          </span>
+        ) : (
+          <span className="ms-2 inline-flex items-center gap-1 text-[11px] text-emerald-600">
+            <span className="w-2 h-2 rounded-full bg-emerald-500" /> נשאב עכשיו
+          </span>
+        )}
+        {onRefresh && !loading && (
+          <button
+            onClick={onRefresh}
+            title="מתעלם מהמטמון ושואב מחדש — פעולה זו צורכת קרדיט"
+            className="ms-auto text-[11.5px] font-bold text-slate-500 hover:text-indigo-600 transition"
+          >
+            רענן ↻
+          </button>
+        )}
       </div>
-      <p className="text-[12px] text-slate-400 mb-4">נשאב אוטומטית מול מחיר הסגירה של רשות המסים</p>
+      <p className="text-[12px] text-slate-400 mb-4">
+        {fromCache
+          ? "חיפוש חוזר של אותה עיר תוך 24 שעות מוגש מהמטמון ואינו עולה כלום."
+          : "נשאב אוטומטית מול מחיר הסגירה של רשות המסים"}
+      </p>
 
       <div className="grid sm:grid-cols-3 gap-3">
         {/* מדלן אינו כאן בכוונה: הוא מחזיר אנליטיקה עירונית ולא מודעות

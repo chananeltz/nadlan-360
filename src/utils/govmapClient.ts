@@ -492,6 +492,63 @@ export interface BridgeResult {
 }
 
 /**
+ * מטמון בדפדפן — שכבה שנייה מעל המטמון שבשרת.
+ *
+ * למה צריך את שתיהן: המטמון בשרת משותף לכל המכשירים, אבל באירוח בשכבה
+ * חינמית השרת נרדם אחרי רבע שעה והזיכרון שלו נמחק — כך שחיפוש חוזר למחרת
+ * היה מחויב שוב. המטמון כאן שורד סגירת דפדפן וכיבוי מחשב, ולכן חיפוש חוזר
+ * של אותה עיר לא עולה כלום גם אחרי שהשרת התאפס.
+ */
+const LOCAL_CACHE_PREFIX = "nadlan360_cache_";
+const LOCAL_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+
+function readLocalCache<T>(key: string): T | null {
+  try {
+    const raw = localStorage.getItem(LOCAL_CACHE_PREFIX + key);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || Date.now() - parsed.at > LOCAL_CACHE_TTL_MS) {
+      localStorage.removeItem(LOCAL_CACHE_PREFIX + key);
+      return null;
+    }
+    return parsed.data as T;
+  } catch {
+    return null;
+  }
+}
+
+function writeLocalCache(key: string, data: unknown) {
+  try {
+    localStorage.setItem(LOCAL_CACHE_PREFIX + key, JSON.stringify({ at: Date.now(), data }));
+  } catch {
+    // מכסת האחסון מלאה: מפנים רשומות ישנות ומנסים פעם אחת נוספת.
+    try {
+      for (const k of Object.keys(localStorage)) {
+        if (k.startsWith(LOCAL_CACHE_PREFIX)) localStorage.removeItem(k);
+      }
+      localStorage.setItem(LOCAL_CACHE_PREFIX + key, JSON.stringify({ at: Date.now(), data }));
+    } catch {
+      // עדיין לא נכנס — מוותרים בשקט; המטמון הוא אופטימיזציה, לא תנאי.
+    }
+  }
+}
+
+/** מוחק את המטמון המקומי, כדי לאלץ שאיבה טרייה. */
+export function clearLocalCache(): number {
+  let n = 0;
+  try {
+    for (const k of Object.keys(localStorage)) {
+      if (k.startsWith(LOCAL_CACHE_PREFIX)) {
+        localStorage.removeItem(k);
+        n += 1;
+      }
+    }
+  } catch {}
+  return n;
+}
+
+
+/**
  * בודק שהשרת זמין ושמוגדר בו טוקן Apify.
  *
  * הפסקת זמן ארוכה בכוונה: באירוח בשכבה חינמית השרת נרדם אחרי חוסר פעילות,
@@ -513,6 +570,10 @@ export async function bridgeHealth(): Promise<boolean> {
  * בדפדפן פתוח, בהתחברות לחשבונות, או במחשב דלוק.
  */
 export async function bridgeScrape(source: string, city: string, street: string): Promise<BridgeResult | null> {
+  const cacheKey = `src_${source}_${city.trim()}_${street.trim()}`;
+  const cached = readLocalCache<BridgeResult>(cacheKey);
+  if (cached) return cached;
+
   try {
     const url = `${API_BASE}/api/sources/${encodeURIComponent(source)}?city=${encodeURIComponent(
       city,
@@ -521,6 +582,7 @@ export async function bridgeScrape(source: string, city: string, street: string)
     if (!r.ok) return null;
     const d = await r.json();
     if (!d || d.error || !d.count) return null;
+    writeLocalCache(cacheKey, d);
     return d as BridgeResult;
   } catch {
     return null;
@@ -622,6 +684,10 @@ export interface MadlanAnalytics {
 
 /** אנליטיקת מדלן ברמת עיר — מחיר למ"ר, מגמה שנתית, היצע ומדד חברתי. */
 export async function fetchMadlanAnalytics(city: string): Promise<MadlanAnalytics | null> {
+  const cacheKey = `madlan_${city.trim()}`;
+  const cached = readLocalCache<MadlanAnalytics>(cacheKey);
+  if (cached) return cached;
+
   try {
     const r = await fetch(`${API_BASE}/api/sources/madlan?city=${encodeURIComponent(city)}`, {
       signal: AbortSignal.timeout(280000),
@@ -629,6 +695,7 @@ export async function fetchMadlanAnalytics(city: string): Promise<MadlanAnalytic
     if (!r.ok) return null;
     const d = await r.json();
     if (!d || d.error) return null;
+    writeLocalCache(cacheKey, d);
     return d as MadlanAnalytics;
   } catch {
     return null;
