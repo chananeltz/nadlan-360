@@ -253,6 +253,39 @@ function normalizeDeal(raw: RawDeal, source: Deal["source"], distance: number): 
   };
 }
 
+// ---- גוש וחלקה ----
+
+/**
+ * מזהה קלט של גוש/חלקה ומחזיר אותו בפורמט ש-GovMap מבין.
+ * נתמך: "גוש 6638 חלקה 45", "6638/45", "6638 45".
+ * מחזיר null אם זו לא נראית בקשת גוש/חלקה — ואז מטופל ככתובת רגילה.
+ */
+export function parseGushHelka(input: string): { gush: number; helka: number; query: string } | null {
+  const t = (input || "").trim();
+  if (!t) return null;
+
+  const labeled = t.match(/גוש\s*(\d{1,6})\D+(?:חלקה\s*)?(\d{1,5})/);
+  const slashed = t.match(/^(\d{3,6})\s*[\/\-\s]\s*(\d{1,5})$/);
+  const m = labeled || slashed;
+  if (!m) return null;
+
+  const gush = parseInt(m[1], 10);
+  const helka = parseInt(m[2], 10);
+  if (!gush || !helka) return null;
+  return { gush, helka, query: `גוש ${gush} חלקה ${helka}` };
+}
+
+/** מאתר עסקאות רשות המסים סביב גוש/חלקה. רדיוס צר — החלקה היא נקודה מדויקת. */
+export async function findDealsByGushHelka(
+  gushHelka: { gush: number; helka: number; query: string },
+  options: FindDealsOptions = {},
+): Promise<Deal[]> {
+  return findRecentDealsForAddress(gushHelka.query, {
+    radius: 200,
+    ...options,
+  });
+}
+
 // ---- הזרימה המרכזית ----
 
 export interface FindDealsOptions {
@@ -335,7 +368,8 @@ export async function findRecentDealsForAddress(
   // טווח תאריכים
   const now = new Date(); // מותר כאן — קוד שרת רץ בזמן אמת
   const from = new Date(now);
-  from.setFullYear(now.getFullYear() - yearsBack);
+  // נספר בחודשים ולא בשנים, כדי לתמוך בחצאי שנים (0.5 → 6 חודשים).
+  from.setMonth(now.getMonth() - Math.round(yearsBack * 12));
   const startDate = from.toISOString().slice(0, 7);
   const endDate = now.toISOString().slice(0, 7);
 
@@ -418,6 +452,116 @@ function median(nums: number[]): number {
 function mean(nums: number[]): number {
   if (nums.length === 0) return 0;
   return Math.round(nums.reduce((s, n) => s + n, 0) / nums.length);
+}
+
+// ---- מקורות מחיר-מבוקש (יד2 · יד1 · מדלן · פייסבוק דרך השרת) ----
+
+/**
+ * הכתובת של ה-API. ריק = אותו מקור של האתר (פיתוח מקומי / הגשה מהשרת).
+ * באתר סטטי (GitHub Pages) יש להצביע על השרת המאוחסן דרך VITE_API_URL.
+ */
+const API_BASE = (import.meta as any).env?.VITE_API_URL || "";
+
+export interface BridgeResult {
+  source: string;
+  /** "street" = סונן לרחוב המבוקש · "city" = רמת עיר (לא נמצאו מספיק ברחוב). */
+  scope?: "street" | "city";
+  count: number;
+  cityCount?: number;
+  streetCount?: number;
+  medianPrice: number;
+  medianPricePerSqm: number | null;
+}
+
+/** בודק שהשרת זמין ושמוגדר בו טוקן Apify. */
+export async function bridgeHealth(): Promise<boolean> {
+  try {
+    const r = await fetch(`${API_BASE}/api/health`, { signal: AbortSignal.timeout(4000) });
+    if (!r.ok) return false;
+    const d = await r.json();
+    return !!d?.hasApifyToken;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * שואב מקור אחד דרך השרת. השאיבה עצמה רצה בשרתי Apify, ולכן אין צורך
+ * בדפדפן פתוח, בהתחברות לחשבונות, או במחשב דלוק.
+ */
+export async function bridgeScrape(source: string, city: string, street: string): Promise<BridgeResult | null> {
+  try {
+    const url = `${API_BASE}/api/sources/${encodeURIComponent(source)}?city=${encodeURIComponent(
+      city,
+    )}&street=${encodeURIComponent(street)}`;
+    const r = await fetch(url, { signal: AbortSignal.timeout(280000) });
+    if (!r.ok) return null;
+    const d = await r.json();
+    if (!d || d.error || !d.count) return null;
+    return d as BridgeResult;
+  } catch {
+    return null;
+  }
+}
+
+export interface MadlanAnalytics {
+  source: "madlan";
+  cityHebrew: string | null;
+  pricePerSqm: number | null;
+  yearlyDeals: number | null;
+  bulletinsForSale: number | null;
+  bulletinsForRent: number | null;
+  socioeconomicIndex: number | null;
+  pricesByRooms: { rooms: string; medianBuyPrice: number | null; previousBuyPrice: number | null }[];
+  yearlyChangePct: number | null;
+}
+
+/** אנליטיקת מדלן ברמת עיר — מחיר למ"ר, מגמה שנתית, היצע ומדד חברתי. */
+export async function fetchMadlanAnalytics(city: string): Promise<MadlanAnalytics | null> {
+  try {
+    const r = await fetch(`${API_BASE}/api/sources/madlan?city=${encodeURIComponent(city)}`, {
+      signal: AbortSignal.timeout(280000),
+    });
+    if (!r.ok) return null;
+    const d = await r.json();
+    if (!d || d.error) return null;
+    return d as MadlanAnalytics;
+  } catch {
+    return null;
+  }
+}
+
+// ---- מדד חברתי-כלכלי (הלמ"ס דרך data.gov.il) ----
+
+const SOCIO_RESOURCE = "b6dcbb4c-4102-43d2-a5a1-8e049457fe7a";
+
+export interface SocioEconomic {
+  name: string;
+  cluster: number; // אשכול 1–10 (1=נמוך, 10=גבוה)
+  label: string; // נמוך / בינוני / גבוה / גבוה מאוד
+}
+
+/** שולף את המדד החברתי-כלכלי (אשכול הלמ"ס 1–10) לעיר מנתוני data.gov.il. */
+export async function getSocioEconomic(city: string): Promise<SocioEconomic | null> {
+  const url = `https://data.gov.il/api/3/action/datastore_search?resource_id=${SOCIO_RESOURCE}&q=${encodeURIComponent(
+    city.trim(),
+  )}&limit=8`;
+  try {
+    const data = await withRetry(() => getJson(url), 1);
+    const recs: any[] = data?.result?.records || [];
+    if (!recs.length) return null;
+    const target = city.trim();
+    const exact =
+      recs.find((r) => String(r["שם רשות"]).trim() === target) ||
+      recs.find((r) => String(r["שם רשות"]).includes(target)) ||
+      recs[0];
+    const cluster = Number(exact["אשכול חברתי כלכלי"]);
+    if (!cluster || Number.isNaN(cluster)) return null;
+    const label = cluster <= 3 ? "נמוך" : cluster <= 6 ? "בינוני" : cluster <= 8 ? "גבוה" : "גבוה מאוד";
+    return { name: String(exact["שם רשות"]).trim(), cluster, label };
+  } catch {
+    return null;
+  }
 }
 
 // ---- ניתוח השקעה (מדד לחברת בנייה) ----

@@ -5,6 +5,7 @@ import * as xlsx from "xlsx";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI } from "@google/genai";
 import dotenv from "dotenv";
+import { fetchYad2, fetchYad1, fetchMadlan, fetchFacebook } from "./apifySources";
 
 // Load environment variables
 dotenv.config();
@@ -711,9 +712,60 @@ app.post("/api/analyze-omni", async (req, res) => {
   }
 });
 
+/**
+ * מקורות מחיר-מבוקש דרך Apify (יד2 · יד1 · מדלן · פייסבוק).
+ *
+ * הקריאות רצות כאן ולא בדפדפן משתי סיבות: הטוקן חייב להישאר בצד השרת,
+ * והדפדפן ממילא חסום מול הגנות האנטי-בוט של יד2/מדלן. Apify מריצים את
+ * התשתית אצלם, ולכן אין קאפצ'ה ואין צורך בחשבונות של המשתמש.
+ */
+app.get("/api/sources/:source", async (req, res) => {
+  const source = String(req.params.source || "").toLowerCase();
+  const city = String(req.query.city || "").trim();
+  const street = String(req.query.street || "").trim();
+  const neighbourhood = String(req.query.neighbourhood || "").trim();
+
+  if (!city) {
+    res.status(400).json({ error: "חסרה עיר" });
+    return;
+  }
+  if (!process.env.APIFY_TOKEN) {
+    res.status(503).json({ error: "APIFY_TOKEN לא מוגדר בשרת" });
+    return;
+  }
+
+  try {
+    switch (source) {
+      case "yad2":
+        res.json(await fetchYad2(city, street));
+        return;
+      case "yad1":
+        res.json(await fetchYad1(city, street));
+        return;
+      case "madlan":
+        res.json(await fetchMadlan(city, neighbourhood || undefined));
+        return;
+      case "facebook":
+        res.json(await fetchFacebook(city, street));
+        return;
+      default:
+        res.status(404).json({ error: `מקור לא מוכר: ${source}` });
+        return;
+    }
+  } catch (error: any) {
+    console.error(`[sources/${source}]`, error?.message || error);
+    res.status(502).json({ error: error?.message || "שאיבת המקור נכשלה" });
+  }
+});
+
 // Serve health status
 app.get("/api/health", (req, res) => {
-  res.json({ status: "ok", time: new Date().toISOString(), hasApiKey: !!process.env.GEMINI_API_KEY });
+  res.json({
+    status: "ok",
+    time: new Date().toISOString(),
+    hasApiKey: !!process.env.GEMINI_API_KEY,
+    hasApifyToken: !!process.env.APIFY_TOKEN,
+  });
 });
 
 // Integrate Vite based on environment
