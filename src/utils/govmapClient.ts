@@ -462,6 +462,22 @@ function mean(nums: number[]): number {
  */
 const API_BASE = (import.meta as any).env?.VITE_API_URL || "";
 
+/** מודעה בודדת ממקור מחיר-מבוקש, להצגה ברשימה לפי תאריך. */
+export interface SourceListing {
+  source: string;
+  price: number;
+  sqm: number | null;
+  pricePerSqm: number | null;
+  rooms: number | null;
+  floor: number | null;
+  street: string;
+  neighbourhood: string;
+  date: string;
+  url: string;
+  title: string;
+  isAgent: boolean;
+}
+
 export interface BridgeResult {
   source: string;
   /** "street" = סונן לרחוב המבוקש · "city" = רמת עיר (לא נמצאו מספיק ברחוב). */
@@ -471,6 +487,8 @@ export interface BridgeResult {
   streetCount?: number;
   medianPrice: number;
   medianPricePerSqm: number | null;
+  /** המודעות עצמן, ממוינות מהחדשה לישנה. */
+  listings?: SourceListing[];
 }
 
 /**

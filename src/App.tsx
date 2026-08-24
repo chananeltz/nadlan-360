@@ -51,6 +51,7 @@ import {
   type SocioEconomic,
   type BridgeResult,
   type MadlanAnalytics,
+  type SourceListing,
   type CreditStatus,
 } from "./utils/govmapClient.ts";
 
@@ -754,6 +755,11 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
               />
             )}
 
+            {/* כל המודעות שנמצאו, לפי תאריך, עם ציון המקור */}
+            {liveSources.some((s) => s.listings?.length) && (
+              <SourceListingsTable sources={liveSources} />
+            )}
+
             {/* אנליטיקת מדלן — מגמה, היצע ומחיר למ"ר ברמת העיר */}
             {madlan && <MadlanPanel m={madlan} closingPpsm={stats.medianPricePerSqm} />}
 
@@ -849,6 +855,157 @@ const SOURCE_LABEL: Record<string, string> = {
   yad1: "יד1",
   madlan: "מדלן PRO",
 };
+
+/* ---------- מודעות מכל המקורות ---------- */
+const SOURCE_STYLE: Record<string, string> = {
+  yad2: "bg-orange-50 text-orange-700 border-orange-200",
+  yad1: "bg-sky-50 text-sky-700 border-sky-200",
+  facebook: "bg-blue-50 text-blue-700 border-blue-200",
+  madlan: "bg-violet-50 text-violet-700 border-violet-200",
+};
+
+/**
+ * מאחד את המודעות מכל המקורות לרשימה אחת ממוינת לפי תאריך פרסום.
+ * לכל שורה מסומן המקור, כדי שיהיה ברור מאיפה כל מחיר הגיע.
+ */
+function SourceListingsTable({ sources }: { sources: BridgeResult[] }) {
+  const [showAll, setShowAll] = useState(false);
+  const [filter, setFilter] = useState<string>("all");
+
+  const all = useMemo(() => {
+    const rows: SourceListing[] = [];
+    for (const s of sources) if (s.listings) rows.push(...s.listings);
+    // ללא תאריך — לסוף, אחרת המיון נראה שרירותי.
+    return rows.sort((a, b) => {
+      if (!a.date && !b.date) return b.price - a.price;
+      if (!a.date) return 1;
+      if (!b.date) return -1;
+      return b.date.localeCompare(a.date);
+    });
+  }, [sources]);
+
+  const shown = useMemo(
+    () => (filter === "all" ? all : all.filter((r) => r.source === filter)),
+    [all, filter],
+  );
+  const visible = showAll ? shown : shown.slice(0, 25);
+
+  const availableSources = useMemo(
+    () => sources.filter((s) => s.listings?.length).map((s) => s.source),
+    [sources],
+  );
+
+  const fmtDate = (d: string) => {
+    if (!d) return "—";
+    const [y, m, day] = d.split("-");
+    return `${day}.${m}.${y.slice(2)}`;
+  };
+
+  return (
+    <div className="glass-ios rounded-3xl p-5">
+      <div className="flex items-center gap-2 mb-1 flex-wrap">
+        <FileUp size={18} className="text-indigo-500" />
+        <h3 className="font-bold text-slate-800">כל המודעות שנמצאו</h3>
+        <span className="text-[11px] text-slate-400">{nf.format(all.length)} מודעות · לפי תאריך פרסום</span>
+      </div>
+      <p className="text-[12px] text-slate-400 mb-3">
+        מחירי מבוקש מהמקורות החיים. ליד כל מודעה מצוין מאיזה מקור היא הגיעה.
+      </p>
+
+      <div className="flex flex-wrap gap-1.5 mb-3">
+        <button
+          onClick={() => setFilter("all")}
+          className={`text-[12px] font-bold px-3 py-1.5 rounded-full border transition ${
+            filter === "all" ? "bg-slate-800 text-white border-slate-800" : "bg-white text-slate-600 border-slate-200"
+          }`}
+        >
+          הכל ({all.length})
+        </button>
+        {availableSources.map((src) => {
+          const n = all.filter((r) => r.source === src).length;
+          return (
+            <button
+              key={src}
+              onClick={() => setFilter(src)}
+              className={`text-[12px] font-bold px-3 py-1.5 rounded-full border transition ${
+                filter === src
+                  ? "bg-slate-800 text-white border-slate-800"
+                  : SOURCE_STYLE[src] || "bg-white text-slate-600 border-slate-200"
+              }`}
+            >
+              {SOURCE_LABEL[src] || src} ({n})
+            </button>
+          );
+        })}
+      </div>
+
+      <div className="overflow-x-auto -mx-1">
+        <table className="w-full text-[12.5px] min-w-[560px]">
+          <thead>
+            <tr className="text-slate-400 text-[11.5px] border-b border-slate-200">
+              <th className="text-right font-bold py-2 px-1">תאריך</th>
+              <th className="text-right font-bold py-2 px-1">מקור</th>
+              <th className="text-right font-bold py-2 px-1">כתובת</th>
+              <th className="text-right font-bold py-2 px-1">חדרים</th>
+              <th className="text-right font-bold py-2 px-1">מ״ר</th>
+              <th className="text-right font-bold py-2 px-1">מחיר</th>
+              <th className="text-right font-bold py-2 px-1">₪/מ״ר</th>
+            </tr>
+          </thead>
+          <tbody>
+            {visible.map((r, i) => (
+              <tr key={`${r.source}-${i}`} className="border-b border-slate-100 hover:bg-slate-50/60 transition">
+                <td className="py-2 px-1 text-slate-500 whitespace-nowrap">{fmtDate(r.date)}</td>
+                <td className="py-2 px-1">
+                  <span
+                    className={`inline-block text-[11px] font-bold px-2 py-0.5 rounded-full border ${
+                      SOURCE_STYLE[r.source] || "bg-slate-50 text-slate-600 border-slate-200"
+                    }`}
+                  >
+                    {SOURCE_LABEL[r.source] || r.source}
+                  </span>
+                </td>
+                <td className="py-2 px-1 text-slate-700 max-w-[190px] truncate">
+                  {r.url ? (
+                    <a
+                      href={r.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="hover:text-indigo-600 hover:underline"
+                      title={r.title || r.street}
+                    >
+                      {r.street || r.title || "—"}
+                    </a>
+                  ) : (
+                    <span title={r.title}>{r.street || r.title || "—"}</span>
+                  )}
+                  {r.neighbourhood && (
+                    <span className="block text-[10.5px] text-slate-400 truncate">{r.neighbourhood}</span>
+                  )}
+                </td>
+                <td className="py-2 px-1 text-slate-600">{r.rooms ?? "—"}</td>
+                <td className="py-2 px-1 text-slate-600">{r.sqm ?? "—"}</td>
+                <td className="py-2 px-1 font-bold text-slate-800 whitespace-nowrap">{shekel(r.price)}</td>
+                <td className="py-2 px-1 text-slate-600 whitespace-nowrap">
+                  {r.pricePerSqm ? shekel(r.pricePerSqm) : "—"}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {shown.length > 25 && (
+        <button
+          onClick={() => setShowAll((v) => !v)}
+          className="mt-3 text-[12.5px] font-bold text-indigo-600 hover:text-indigo-700"
+        >
+          {showAll ? "הצג פחות" : `הצג את כל ${nf.format(shown.length)} המודעות`}
+        </button>
+      )}
+    </div>
+  );
+}
 
 /* ---------- הסבר מצב המקורות ---------- */
 /**
@@ -1014,7 +1171,9 @@ function LiveSourcesPanel({
       <p className="text-[12px] text-slate-400 mb-4">נשאב אוטומטית מול מחיר הסגירה של רשות המסים</p>
 
       <div className="grid sm:grid-cols-3 gap-3">
-        {["yad2", "yad1", "madlan"].map((src) => {
+        {/* מדלן אינו כאן בכוונה: הוא מחזיר אנליטיקה עירונית ולא מודעות
+            בודדות, ולכן הוא מוצג בפאנל "מדלן — תמונת שוק עירונית" שמתחת. */}
+        {["yad2", "yad1", "facebook"].map((src) => {
           const r = sources.find((s) => s.source === src);
           const gap =
             r?.medianPricePerSqm && closingPpsm

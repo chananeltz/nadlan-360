@@ -151,6 +151,23 @@ async function runActor(actor: string, input: unknown, timeoutMs = 240000): Prom
   return rows;
 }
 
+/** מודעה בודדת, כדי שאפשר יהיה להציג רשימה לפי תאריך ולא רק חציון. */
+export interface SourceListing {
+  source: string;
+  price: number;
+  sqm: number | null;
+  pricePerSqm: number | null;
+  rooms: number | null;
+  floor: number | null;
+  street: string;
+  neighbourhood: string;
+  /** תאריך פרסום המודעה (YYYY-MM-DD). ריק כשהמקור אינו מספק אותו. */
+  date: string;
+  url: string;
+  title: string;
+  isAgent: boolean;
+}
+
 export interface SourceResult {
   source: string;
   /** "street" = סונן לרחוב המבוקש · "city" = רמת עיר. */
@@ -160,9 +177,18 @@ export interface SourceResult {
   streetCount: number;
   medianPrice: number;
   medianPricePerSqm: number | null;
+  /** המודעות עצמן, ממוינות מהחדשה לישנה. */
+  listings: SourceListing[];
 }
 
 /** ממיר רשימת מודעות גולמית לסיכום, עם סינון לרחוב כשיש מספיק התאמות. */
+/** מנרמל תאריך פרסום לפורמט YYYY-MM-DD; מחזיר ריק כשאין תאריך תקין. */
+function toDateStr(value: unknown): string {
+  if (!value) return "";
+  const d = new Date(String(value));
+  return Number.isNaN(d.getTime()) ? "" : d.toISOString().slice(0, 10);
+}
+
 function summarize(
   rows: any[],
   source: string,
@@ -185,6 +211,31 @@ function summarize(
     })
     .filter((n): n is number => n != null);
 
+  // המודעות עצמן — ממוינות מהחדשה לישנה. מודעה ללא תאריך יורדת לסוף,
+  // כדי שהמיון לא ייראה שרירותי.
+  const listings: SourceListing[] = items
+    .map((r) => {
+      const price = getPrice(r);
+      if (!price) return null;
+      const sqm = getSqm(r);
+      return {
+        source,
+        price,
+        sqm: sqm ?? null,
+        pricePerSqm: sqm && sqm > 0 ? Math.round(price / sqm) : null,
+        rooms: r.rooms != null && !Number.isNaN(Number(r.rooms)) ? Number(r.rooms) : null,
+        floor: r.floor != null && !Number.isNaN(Number(r.floor)) ? Number(r.floor) : null,
+        street: String(getStreet(r) ?? "").slice(0, 80),
+        neighbourhood: String(r.neighbourhood ?? "").slice(0, 60),
+        date: toDateStr(r.publishedAt ?? r.updatedAt ?? r.creation_time),
+        url: String(r.url ?? r.listingUrl ?? ""),
+        title: String(r.listingDescription ?? r.marketplace_listing_title ?? r.title ?? "").slice(0, 120),
+        isAgent: !!(r.hasAgent || r.agencyName),
+      } as SourceListing;
+    })
+    .filter((x): x is SourceListing => x !== null)
+    .sort((a, b) => (b.date || "").localeCompare(a.date || ""));
+
   return {
     source,
     scope: useStreet ? "street" : "city",
@@ -193,6 +244,7 @@ function summarize(
     streetCount: onStreet.length,
     medianPrice: median(prices),
     medianPricePerSqm: ppsm.length ? median(ppsm) : null,
+    listings,
   };
 }
 
