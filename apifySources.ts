@@ -228,7 +228,7 @@ export async function fetchMadlan(city: string, neighbourhood?: string): Promise
  * הערה: התוצאות עשויות לכלול פרטים אישיים של מוכרים; אנחנו שומרים רק
  * מחיר/שטח/כותרת לצורך החציון, ולא שם או קשר.
  */
-export async function fetchFacebook(city: string, street: string, maxItems = 60): Promise<SourceResult> {
+export async function fetchFacebook(city: string, street: string, maxItems = 140): Promise<SourceResult> {
   // חיפוש חופשי (search/?query=) מתעלם מהמיקום ומחזיר מודעות אמריקאיות
   // בדולרים. כתובת מיקום ישראלית מחזירה מודעות בשקלים — אך הן ארציות,
   // כי רוב מפרסמי הנדל"ן בפייסבוק מכסים את כל הארץ. הסינון לעיר נעשה כאן.
