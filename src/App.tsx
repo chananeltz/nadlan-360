@@ -759,6 +759,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
                 loading={liveLoading}
                 closingPrice={stats.medianPrice}
                 closingPpsm={stats.medianPricePerSqm}
+                madlan={madlan}
                 fromCache={fromCache}
                 onRefresh={() => {
                   // רענון יזום: מנקים את המטמון המקומי כדי לאלץ שאיבה טרייה.
@@ -1166,9 +1167,11 @@ function LiveSourcesPanel({
   loading,
   closingPrice,
   closingPpsm,
+  madlan,
   fromCache,
   onRefresh,
 }: {
+  madlan?: MadlanAnalytics | null;
   fromCache?: boolean;
   onRefresh?: () => void;
   sources: BridgeResult[];
@@ -1180,7 +1183,7 @@ function LiveSourcesPanel({
     <div className="glass-ios rounded-3xl p-5">
       <div className="flex items-center gap-2 mb-1">
         <Scale size={18} className="text-indigo-500" />
-        <h3 className="font-bold text-slate-800">מחירי מבוקש חיים — יד2 · יד1 · פייסבוק</h3>
+        <h3 className="font-bold text-slate-800">מחירי מבוקש חיים — יד2 · יד1 · מדלן · פייסבוק</h3>
         {fromCache ? (
           <span
             className="ms-2 inline-flex items-center gap-1 text-[11px] text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-full px-2 py-0.5"
@@ -1209,11 +1212,47 @@ function LiveSourcesPanel({
           : "נשאב אוטומטית מול מחיר הסגירה של רשות המסים"}
       </p>
 
-      <div className="grid sm:grid-cols-3 gap-3">
-        {/* מדלן אינו כאן בכוונה: הוא מחזיר אנליטיקה עירונית ולא מודעות
-            בודדות, ולכן הוא מוצג בפאנל "מדלן — תמונת שוק עירונית" שמתחת. */}
-        {["yad2", "yad1", "facebook"].map((src) => {
+      <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-3">
+        {["yad2", "yad1", "madlan", "facebook"].map((src) => {
           const r = sources.find((s) => s.source === src);
+          // מדלן אינו מחזיר מודעות בודדות אלא אנליטיקה עירונית, ולכן הכרטיס
+          // שלו נבנה מנתוני האנליטיקה ומפנה לפאנל המפורט שמתחת.
+          if (src === "madlan") {
+            const gapM =
+              madlan?.pricePerSqm && closingPpsm
+                ? Math.round(((madlan.pricePerSqm - closingPpsm) / closingPpsm) * 1000) / 10
+                : null;
+            return (
+              <div key={src} className="rounded-2xl bg-slate-50 border border-slate-100 p-4">
+                <div className="text-[13px] font-bold text-slate-700 mb-1">מדלן</div>
+                {madlan?.pricePerSqm ? (
+                  <>
+                    <div className="text-lg font-bold text-slate-800">{shekel(madlan.pricePerSqm)}</div>
+                    <div className="text-[12px] text-slate-500">
+                      למ״ר · {nf.format(madlan.bulletinsForSale || 0)} מודעות בעיר
+                    </div>
+                    <div className="text-[11px] mt-1 text-slate-400">אנליטיקה עירונית</div>
+                    {gapM != null && (
+                      <div
+                        className={`text-[12px] mt-1 font-semibold ${
+                          gapM > 0 ? "text-amber-600" : "text-emerald-600"
+                        }`}
+                      >
+                        {gapM > 0 ? "+" : ""}
+                        {gapM}% מול הסגירה
+                      </div>
+                    )}
+                  </>
+                ) : loading ? (
+                  <div className="flex items-center gap-1.5 text-[12px] text-slate-400 mt-1">
+                    <Loader2 size={13} className="animate-spin" /> שואב…
+                  </div>
+                ) : (
+                  <div className="text-[12px] text-slate-400 mt-1">אין נתונים לעיר זו</div>
+                )}
+              </div>
+            );
+          }
           const gap =
             r?.medianPricePerSqm && closingPpsm
               ? Math.round(((r.medianPricePerSqm - closingPpsm) / closingPpsm) * 1000) / 10
@@ -1246,7 +1285,15 @@ function LiveSourcesPanel({
                   <Loader2 size={13} className="animate-spin" /> שואב…
                 </div>
               ) : (
-                <div className="text-[12px] text-slate-400 mt-1">אין נתונים</div>
+                <div className="text-[12px] text-slate-400 mt-1">
+                  {src === "facebook" ? (
+                    <span title="הפיד של Marketplace ארצי ולא ממוין לפי עיר, ולכן ערים רבות אינן מיוצגות בו">
+                      לא נמצאו מודעות בעיר זו
+                    </span>
+                  ) : (
+                    "אין נתונים"
+                  )}
+                </div>
               )}
             </div>
           );

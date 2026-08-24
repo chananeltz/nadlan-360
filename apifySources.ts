@@ -350,8 +350,28 @@ export async function fetchFacebook(city: string, street: string, maxItems = 140
     return HOME_WORDS.test(titleOf(r)) ? n : null;
   };
 
-  // הפיד ארצי, ולכן שם העיר חייב להופיע בכותרת — אחרת החציון מערבב ערים.
+  /**
+   * הפיד ארצי, ולכן חייבים לסנן לעיר — אחרת החציון מערבב ערים ואיננו אומר כלום.
+   * ההשוואה סלחנית: פייסבוק כתובה בשפה חופשית ("ת״א", "תל אביב יפו", "רמת-גן"),
+   * והשוואה מדויקת פספסה מודעות אמיתיות והחזירה רשימה ריקה.
+   */
   const cityName = (city || "").trim();
-  const inCity = rows.filter((r) => toPrice(r) != null && (!cityName || titleOf(r).includes(cityName)));
+  const cityAliases = new Set<string>([cityName]);
+  const noHyphen = cityName.replace(/[-־]/g, " ");
+  cityAliases.add(noHyphen);
+  if (/^תל אביב/.test(noHyphen)) ["תל אביב", "תל-אביב", "ת\"א", "תא"].forEach((a) => cityAliases.add(a));
+  // "רמת גן" צריך להימצא גם ב"רמת-גן"; משווים מול טקסט מנורמל.
+  const normalize = (t: string) => t.replace(/[-־]/g, " ").replace(/\s+/g, " ");
+
+  const matchesCity = (r: any) => {
+    if (!cityName) return true;
+    const t = normalize(titleOf(r));
+    for (const alias of cityAliases) if (alias && t.includes(normalize(alias))) return true;
+    // המיקום שפייסבוק מדווח עליו, כשקיים, אמין יותר מהכותרת.
+    const loc = r.location?.reverse_geocode?.city || r.location?.text || "";
+    return !!loc && normalize(String(loc)).includes(normalize(cityName));
+  };
+
+  const inCity = rows.filter((r) => toPrice(r) != null && matchesCity(r));
   return summarize(inCity, "facebook", street, titleOf, toPrice, () => null);
 }
