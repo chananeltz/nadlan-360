@@ -23,6 +23,13 @@ services:
         sync: false
       - key: AUTH_PASSWORD
         sync: false
+      # אחסון מתמיד למאגר השמור. בלעדיו המטמון מת בכל אתחול של השרת
+      # (בשכבה חינמית זה קורה אחרי רבע שעה) והשאיבה מחויבת שוב.
+      # הריפו חייב להיות פרטי — התוכן הוא תוצרי שאיבה.
+      - key: GITHUB_CACHE_TOKEN
+        sync: false
+      - key: GITHUB_CACHE_REPO
+        value: chananeltz/nadlan-360-cache
       # מצמצם מי רשאי לקרוא ל-API. ריק = פתוח לכולם.
       - key: ALLOWED_ORIGINS
         value: https://chananeltz.github.io

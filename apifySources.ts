@@ -1,3 +1,4 @@
+import { readFromGithub, writeToGithub, isGithubStoreEnabled } from "./githubStore";
 /**
  * שאיבת מקורות מחיר-מבוקש דרך Apify — יד2 · יד1 · מדלן · פייסבוק.
  *
@@ -99,6 +100,32 @@ function pruneCache() {
   }
 }
 
+/**
+ * מסיר פרטים אישיים של מפרסמים לפני עיבוד ואחסון.
+ *
+ * מודעות יד2 מגיעות עם טלפון ושם של המוכר, ופייסבוק עם פרטי מוכר. האתר
+ * אינו מציג אותם ואינו זקוק להם, ואחסונם — במיוחד מחוץ לשרת — היה הופך
+ * שמירת מטמון לפרסום מידע אישי של אנשים אמיתיים. מוסרים אותם במקור.
+ */
+const PERSONAL_FIELDS = [
+  "contactPhone",
+  "contactName",
+  "phone",
+  "sellerName",
+  "seller",
+  "userName",
+  "profileUrl",
+  "actorId",
+  "listingVideo",
+];
+
+function stripPersonalData<T extends Record<string, any>>(row: T): T {
+  if (!row || typeof row !== "object") return row;
+  const clean: Record<string, any> = { ...row };
+  for (const f of PERSONAL_FIELDS) delete clean[f];
+  return clean as T;
+}
+
 /** נזרקת כשהתבקש מטמון בלבד ואין רשומה מתאימה — כדי להבדיל מכשל אמיתי. */
 export class CacheMissError extends Error {
   constructor(actor: string) {
@@ -128,6 +155,18 @@ async function runActor(
     console.log(`[apify] מטמון: ${actor} (גיל ${ageMin} דק׳) — לא חויב`);
     return cached.rows;
   }
+  // המטמון בזיכרון מת עם כל אתחול של השרת. לפני שמשלמים על שאיבה,
+  // בודקים את האחסון המתמיד — שם התוצאה שורדת אתחולים ופריסות.
+  if (isGithubStoreEnabled()) {
+    const stored = await readFromGithub(cacheKey, CACHE_TTL_MS);
+    if (stored) {
+      resultCache.set(cacheKey, { at: stored.at, rows: stored.rows });
+      const ageH = Math.round((Date.now() - stored.at) / 3600000);
+      console.log(`[apify] אחסון מתמיד: ${actor} (גיל ${ageH} ש׳) — לא חויב`);
+      return stored.rows;
+    }
+  }
+
   if (cacheOnly) throw new CacheMissError(actor);
 
   const url = `${APIFY_BASE}/${actor}/run-sync-get-dataset-items?token=${encodeURIComponent(token)}`;
@@ -163,13 +202,18 @@ async function runActor(
     throw new Error(`Apify ${actor} החזיר ${res.status}: ${body.slice(0, 200)}`);
   }
   const data = await res.json();
-  const rows = Array.isArray(data) ? data : [];
+  const rows = (Array.isArray(data) ? data : []).map(stripPersonalData);
 
   // שומרים גם תוצאה ריקה: אם המקור לא מכסה את העיר, אין טעם לשלם על
   // אותה תשובה שוב ושוב באותו יום.
   resultCache.set(cacheKey, { at: Date.now(), rows });
   pruneCache();
   console.log(`[apify] חויב: ${actor} — ${rows.length} תוצאות`);
+
+  // כתיבה ברקע: אין סיבה להשהות את התשובה למשתמש בשביל שמירה.
+  if (isGithubStoreEnabled() && rows.length > 0) {
+    writeToGithub(cacheKey, rows).catch(() => {});
+  }
 
   return rows;
 }
