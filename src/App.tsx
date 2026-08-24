@@ -1,4 +1,4 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 import {
   ResponsiveContainer,
   BarChart,
@@ -306,6 +306,10 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
   const [liveSources, setLiveSources] = useState<BridgeResult[]>([]);
   const [madlan, setMadlan] = useState<MadlanAnalytics | null>(null);
   const [credit, setCredit] = useState<CreditStatus | null>(null);
+  // נטען פעם אחת בכניסה, כדי שהמחוון יופיע עוד לפני החיפוש הראשון.
+  useEffect(() => {
+    fetchCreditStatus().then(setCredit).catch(() => {});
+  }, []);
   const [fromCache, setFromCache] = useState(false);
   const [liveLoading, setLiveLoading] = useState(false);
   const [query, setQuery] = useState("");
@@ -515,9 +519,10 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
             <div className="font-bold text-[17px]">נדל״ן 360</div>
             <div className="text-[11px] text-slate-500">נתוני עסקאות אמת · רשות המסים</div>
           </div>
+          {credit && <CreditMeter credit={credit} />}
           <button
             onClick={onLogout}
-            className="ms-auto flex items-center gap-1.5 text-[13px] text-slate-500 hover:text-slate-800 rounded-xl px-2.5 py-1.5 transition"
+            className="flex items-center gap-1.5 text-[13px] text-slate-500 hover:text-slate-800 rounded-xl px-2.5 py-1.5 transition"
           >
             <LogOut size={15} /> יציאה
           </button>
@@ -869,6 +874,46 @@ const SOURCE_LABEL: Record<string, string> = {
   yad1: "יד1",
   madlan: "מדלן PRO",
 };
+
+/* ---------- מחוון קרדיט ---------- */
+/**
+ * כמה קרדיט נותר לשאיבות. יושב בכותרת כדי שיהיה גלוי תמיד — בלעדיו
+ * הקרדיט נגמר בלי אזהרה והמקורות מפסיקים לעבוד בלי סיבה נראית לעין.
+ */
+function CreditMeter({ credit }: { credit: CreditStatus }) {
+  if (!credit.configured || credit.unknown || credit.capUsd == null) return null;
+
+  const used = credit.usedUsd ?? 0;
+  const cap = credit.capUsd || 0;
+  const left = Math.max(0, Math.round((cap - used) * 100) / 100);
+  const pct = cap > 0 ? Math.min(100, (used / cap) * 100) : 0;
+  // מתחת לחמישית נותר — אדום; מתחת לחצי — כתום.
+  const tone = left <= 0 ? "rose" : left / cap < 0.2 ? "amber" : "emerald";
+  const barColor = tone === "rose" ? "bg-rose-500" : tone === "amber" ? "bg-amber-500" : "bg-emerald-500";
+  const textColor = tone === "rose" ? "text-rose-600" : tone === "amber" ? "text-amber-600" : "text-emerald-600";
+
+  return (
+    <a
+      href="https://console.apify.com/billing/subscription"
+      target="_blank"
+      rel="noopener noreferrer"
+      title={`נוצל $${used} מתוך $${cap} · נשאר $${left}`}
+      className="ms-auto flex items-center gap-2 rounded-xl px-2.5 py-1.5 hover:bg-slate-100/70 transition"
+    >
+      <div className="leading-tight text-right">
+        <div className={`text-[12px] font-bold ${textColor}`}>
+          {left > 0 ? `נשאר $${left}` : "הקרדיט נגמר"}
+        </div>
+        <div className="text-[10px] text-slate-400">
+          נוצל ${used} מתוך ${cap}
+        </div>
+      </div>
+      <div className="w-14 h-1.5 rounded-full bg-slate-200 overflow-hidden">
+        <div className={`h-full rounded-full ${barColor}`} style={{ width: `${pct}%` }} />
+      </div>
+    </a>
+  );
+}
 
 /* ---------- מודעות מכל המקורות ---------- */
 const SOURCE_STYLE: Record<string, string> = {
