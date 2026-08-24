@@ -336,19 +336,19 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
     // ועדיף לומר זאת מיד מאשר להמתין דקה לארבע שגיאות זהות.
     const creditStatus = await fetchCreditStatus();
     setCredit(creditStatus);
-    if (creditStatus.exhausted) {
-      setLiveLoading(false);
-      return;
-    }
+
+    // כשנגמר הקרדיט לא עוצרים: עדיין מגישים כל מה שכבר שמור — במטמון
+    // הדפדפן ובמטמון השרת. cacheOnly מבטיח שלא תצא קריאה בתשלום.
+    const cacheOnly = !!creditStatus.exhausted;
 
     const startedAt = Date.now();
     const listings = ["yad2", "yad1", "facebook"].map((s) =>
-      bridgeScrape(s, city, street).then((res) => {
+      bridgeScrape(s, city, street, cacheOnly).then((res) => {
         if (res && res.count) setLiveSources((prev) => [...prev.filter((p) => p.source !== res.source), res]);
       }),
     );
     // מדלן מחזיר אנליטיקה עירונית (מגמה, היצע, מדד) ולא רשימת מודעות.
-    const analytics = fetchMadlanAnalytics(city).then((d) => {
+    const analytics = fetchMadlanAnalytics(city, cacheOnly).then((d) => {
       if (d && d.pricePerSqm) setMadlan(d);
     });
 
@@ -1080,10 +1080,12 @@ function SourcesStatusNotice({ credit }: { credit: CreditStatus }) {
     body =
       "השרת שמביא את יד2 / יד1 / מדלן / פייסבוק אינו זמין כרגע. נתוני רשות המסים שלמעלה עובדים תמיד ואינם תלויים בו.";
   } else if (credit.exhausted) {
-    title = "נגמר הקרדיט החודשי ב-Apify";
+    title = "נגמר הקרדיט — לא נמצאו נתונים שמורים לעיר זו";
     body = `נוצל ${
       credit.usedUsd != null ? `$${credit.usedUsd}` : "כל הסכום"
-    }${credit.capUsd ? ` מתוך $${credit.capUsd}` : ""}. הקרדיט החינמי מתחדש בתחילת מחזור החיוב הבא, ואז המקורות יחזרו לבד — או שאפשר לשדרג עכשיו.`;
+    }${
+      credit.capUsd ? ` מתוך $${credit.capUsd}` : ""
+    }. ערים שכבר חיפשת מוצגות מהמאגר השמור (נשמר לחודש), אך העיר הזו טרם נשאבה. הקרדיט מתחדש בתחילת מחזור החיוב הבא.`;
     link = { href: "https://console.apify.com/billing/subscription", label: "לניהול הקרדיט ב-Apify" };
   } else if (credit.unknown) {
     body = "לא הצלחנו לבדוק את מצב הקרדיט. נסו שוב בעוד רגע.";
@@ -1234,7 +1236,7 @@ function LiveSourcesPanel({
             className="ms-2 inline-flex items-center gap-1 text-[11px] text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-full px-2 py-0.5"
             title="התוצאה הגיעה ממטמון של 24 שעות — לא חויב קרדיט"
           >
-            ⚡ מהמטמון · ללא חיוב
+            ⚡ מהמאגר השמור · ללא חיוב
           </span>
         ) : (
           <span className="ms-2 inline-flex items-center gap-1 text-[11px] text-emerald-600">
@@ -1253,7 +1255,7 @@ function LiveSourcesPanel({
       </div>
       <p className="text-[12px] text-slate-400 mb-4">
         {fromCache
-          ? "חיפוש חוזר של אותה עיר תוך 24 שעות מוגש מהמטמון ואינו עולה כלום."
+          ? "העיר הזו כבר נשאבה — הנתונים מוגשים מהמאגר השמור (חודש) ואינם עולים כלום."
           : "נשאב אוטומטית מול מחיר הסגירה של רשות המסים"}
       </p>
 

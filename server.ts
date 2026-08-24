@@ -5,7 +5,7 @@ import * as xlsx from "xlsx";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI } from "@google/genai";
 import dotenv from "dotenv";
-import { fetchYad2, fetchYad1, fetchMadlan, fetchFacebook } from "./apifySources";
+import { fetchYad2, fetchYad1, fetchMadlan, fetchFacebook, CacheMissError } from "./apifySources";
 import { verifyCredentials, changePassword, currentUser, isUsingDefaultPassword } from "./serverAuth";
 
 // Load environment variables
@@ -848,12 +848,15 @@ app.get("/api/sources/:source", async (req, res) => {
   const city = String(req.query.city || "").trim();
   const street = String(req.query.street || "").trim();
   const neighbourhood = String(req.query.neighbourhood || "").trim();
+  // cacheOnly: מגיש רק מה שכבר נשאב, בלי לפנות ל-Apify. משמש כשהקרדיט
+  // נגמר — עדיף להציג נתון שמור מאשר מסך ריק.
+  const cacheOnly = req.query.cacheOnly === "1" || req.query.cacheOnly === "true";
 
   if (!city) {
     res.status(400).json({ error: "חסרה עיר" });
     return;
   }
-  if (!process.env.APIFY_TOKEN) {
+  if (!process.env.APIFY_TOKEN && !cacheOnly) {
     res.status(503).json({ error: "APIFY_TOKEN לא מוגדר בשרת" });
     return;
   }
@@ -861,22 +864,27 @@ app.get("/api/sources/:source", async (req, res) => {
   try {
     switch (source) {
       case "yad2":
-        res.json(await fetchYad2(city, street));
+        res.json(await fetchYad2(city, street, 120, cacheOnly));
         return;
       case "yad1":
-        res.json(await fetchYad1(city, street));
+        res.json(await fetchYad1(city, street, 120, cacheOnly));
         return;
       case "madlan":
-        res.json(await fetchMadlan(city, neighbourhood || undefined));
+        res.json(await fetchMadlan(city, neighbourhood || undefined, cacheOnly));
         return;
       case "facebook":
-        res.json(await fetchFacebook(city, street));
+        res.json(await fetchFacebook(city, street, 140, cacheOnly));
         return;
       default:
         res.status(404).json({ error: `מקור לא מוכר: ${source}` });
         return;
     }
   } catch (error: any) {
+    // חוסר במטמון אינו תקלה — פשוט אין מה להגיש עדיין.
+    if (error instanceof CacheMissError) {
+      res.status(200).json({ source, count: 0, cacheMiss: true });
+      return;
+    }
     console.error(`[sources/${source}]`, error?.message || error);
     res.status(502).json({ error: error?.message || "שאיבת המקור נכשלה" });
   }

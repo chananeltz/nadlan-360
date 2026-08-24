@@ -500,7 +500,9 @@ export interface BridgeResult {
  * של אותה עיר לא עולה כלום גם אחרי שהשרת התאפס.
  */
 const LOCAL_CACHE_PREFIX = "nadlan360_cache_";
-const LOCAL_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+// חודש — תואם למטמון שבשרת. שאיבה עולה כסף ומחירים זזים לאט,
+// ולכן עדיף נתון בן שבועיים בחינם מאשר חיוב חוזר על אותה עיר.
+const LOCAL_CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
 function readLocalCache<T>(key: string): T | null {
   try {
@@ -569,7 +571,12 @@ export async function bridgeHealth(): Promise<boolean> {
  * שואב מקור אחד דרך השרת. השאיבה עצמה רצה בשרתי Apify, ולכן אין צורך
  * בדפדפן פתוח, בהתחברות לחשבונות, או במחשב דלוק.
  */
-export async function bridgeScrape(source: string, city: string, street: string): Promise<BridgeResult | null> {
+export async function bridgeScrape(
+  source: string,
+  city: string,
+  street: string,
+  cacheOnly = false,
+): Promise<BridgeResult | null> {
   const cacheKey = `src_${source}_${city.trim()}_${street.trim()}`;
   const cached = readLocalCache<BridgeResult>(cacheKey);
   if (cached) return cached;
@@ -577,7 +584,7 @@ export async function bridgeScrape(source: string, city: string, street: string)
   try {
     const url = `${API_BASE}/api/sources/${encodeURIComponent(source)}?city=${encodeURIComponent(
       city,
-    )}&street=${encodeURIComponent(street)}`;
+    )}&street=${encodeURIComponent(street)}${cacheOnly ? "&cacheOnly=1" : ""}`;
     const r = await fetch(url, { signal: AbortSignal.timeout(280000) });
     if (!r.ok) return null;
     const d = await r.json();
@@ -683,13 +690,14 @@ export interface MadlanAnalytics {
 }
 
 /** אנליטיקת מדלן ברמת עיר — מחיר למ"ר, מגמה שנתית, היצע ומדד חברתי. */
-export async function fetchMadlanAnalytics(city: string): Promise<MadlanAnalytics | null> {
+export async function fetchMadlanAnalytics(city: string, cacheOnly = false): Promise<MadlanAnalytics | null> {
   const cacheKey = `madlan_${city.trim()}`;
   const cached = readLocalCache<MadlanAnalytics>(cacheKey);
   if (cached) return cached;
 
   try {
-    const r = await fetch(`${API_BASE}/api/sources/madlan?city=${encodeURIComponent(city)}`, {
+    const suffix = cacheOnly ? "&cacheOnly=1" : "";
+    const r = await fetch(`${API_BASE}/api/sources/madlan?city=${encodeURIComponent(city)}${suffix}`, {
       signal: AbortSignal.timeout(280000),
     });
     if (!r.ok) return null;

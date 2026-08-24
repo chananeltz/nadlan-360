@@ -72,7 +72,12 @@ function median(nums: number[]): number {
  * המטמון בזיכרון בלבד: הוא מתאפס בהפעלה מחדש של השרת, וזה מקובל — לכל
  * היותר נשלם שוב על החיפוש הראשון.
  */
-const CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 שעות
+/**
+ * חודש. ארוך בכוונה: שאיבה עולה כסף, ומחירי נדל"ן זזים לאט. עדיף להציג
+ * נתון בן שבועיים בחינם מאשר לחייב שוב על אותה עיר — ובכל מקרה יש כפתור
+ * "רענן" למי שרוצה נתון טרי עכשיו.
+ */
+const CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000; // חודש
 const MAX_CACHE_ENTRIES = 300; // תקרה כדי שהזיכרון לא יגדל ללא הגבלה
 
 interface CacheEntry {
@@ -94,10 +99,27 @@ function pruneCache() {
   }
 }
 
-/** מריץ אקטור וממתין לתוצאות. זורק שגיאה ברורה אם הטוקן חסר או שהריצה נכשלה. */
-async function runActor(actor: string, input: unknown, timeoutMs = 240000): Promise<any[]> {
+/** נזרקת כשהתבקש מטמון בלבד ואין רשומה מתאימה — כדי להבדיל מכשל אמיתי. */
+export class CacheMissError extends Error {
+  constructor(actor: string) {
+    super(`אין נתונים שמורים עבור ${actor}`);
+    this.name = "CacheMissError";
+  }
+}
+
+/**
+ * מריץ אקטור וממתין לתוצאות.
+ * cacheOnly=true מחזיר רק מהמטמון ולעולם לא פונה ל-Apify — כך שכשנגמר
+ * הקרדיט עדיין אפשר להציג את מה שכבר נשאב, במקום מסך ריק.
+ */
+async function runActor(
+  actor: string,
+  input: unknown,
+  timeoutMs = 240000,
+  cacheOnly = false,
+): Promise<any[]> {
   const token = process.env.APIFY_TOKEN;
-  if (!token) throw new Error("APIFY_TOKEN חסר בקובץ .env");
+  if (!token && !cacheOnly) throw new Error("APIFY_TOKEN חסר בקובץ .env");
 
   const cacheKey = `${actor}|${JSON.stringify(input)}`;
   const cached = resultCache.get(cacheKey);
@@ -106,6 +128,7 @@ async function runActor(actor: string, input: unknown, timeoutMs = 240000): Prom
     console.log(`[apify] מטמון: ${actor} (גיל ${ageMin} דק׳) — לא חויב`);
     return cached.rows;
   }
+  if (cacheOnly) throw new CacheMissError(actor);
 
   const url = `${APIFY_BASE}/${actor}/run-sync-get-dataset-items?token=${encodeURIComponent(token)}`;
 
@@ -249,12 +272,18 @@ function summarize(
 }
 
 /** יד2 — מודעות מכירה אמיתיות, כולל שם רחוב (מאפשר חיפוש מדויק). */
-export async function fetchYad2(city: string, street: string, maxItems = 120): Promise<SourceResult> {
-  const rows = await runActor(ACTORS.yad2, {
-    city: toEnglishCity(city),
-    dealType: "buy",
-    maxItems,
-  });
+export async function fetchYad2(
+  city: string,
+  street: string,
+  maxItems = 120,
+  cacheOnly = false,
+): Promise<SourceResult> {
+  const rows = await runActor(
+    ACTORS.yad2,
+    { city: toEnglishCity(city), dealType: "buy", maxItems },
+    240000,
+    cacheOnly,
+  );
   return summarize(rows, "yad2", street, (r) => r.streetName || r.address, (r) => r.price, (r) => r.areaSqm);
 }
 
@@ -262,12 +291,18 @@ export async function fetchYad2(city: string, street: string, maxItems = 120): P
  * יד1 — פרויקטים מקבלן. אותו אקטור, adType מסמן מודעות קבלן/פרויקט;
  * אם אין כאלה נחזיר 0 ולא ניפול לרמת עיר מטעה.
  */
-export async function fetchYad1(city: string, street: string, maxItems = 120): Promise<SourceResult> {
-  const rows = await runActor(ACTORS.yad2, {
-    city: toEnglishCity(city),
-    dealType: "buy",
-    maxItems,
-  });
+export async function fetchYad1(
+  city: string,
+  street: string,
+  maxItems = 120,
+  cacheOnly = false,
+): Promise<SourceResult> {
+  const rows = await runActor(
+    ACTORS.yad2,
+    { city: toEnglishCity(city), dealType: "buy", maxItems },
+    240000,
+    cacheOnly,
+  );
   const fromDeveloper = rows.filter(
     (r) => r.adType === "project" || r.adType === "agency" || r.hasAgent === true,
   );
@@ -288,10 +323,14 @@ export interface MadlanAnalytics {
 }
 
 /** מדלן — אנליטיקה עירונית מה-GraphQL הציבורי שלהם (ללא עקיפת הגנות). */
-export async function fetchMadlan(city: string, neighbourhood?: string): Promise<MadlanAnalytics> {
+export async function fetchMadlan(
+  city: string,
+  neighbourhood?: string,
+  cacheOnly = false,
+): Promise<MadlanAnalytics> {
   const input: Record<string, unknown> = { city: toEnglishCity(city), dataTypes: ["all"] };
   if (neighbourhood) input.neighbourhood = neighbourhood;
-  const rows = await runActor(ACTORS.madlan, input);
+  const rows = await runActor(ACTORS.madlan, input, 240000, cacheOnly);
   const d = rows[0] || {};
 
   const byRooms = Array.isArray(d.pricesByRooms) ? d.pricesByRooms : [];
@@ -326,14 +365,24 @@ export async function fetchMadlan(city: string, neighbourhood?: string): Promise
  * הערה: התוצאות עשויות לכלול פרטים אישיים של מוכרים; אנחנו שומרים רק
  * מחיר/שטח/כותרת לצורך החציון, ולא שם או קשר.
  */
-export async function fetchFacebook(city: string, street: string, maxItems = 140): Promise<SourceResult> {
+export async function fetchFacebook(
+  city: string,
+  street: string,
+  maxItems = 140,
+  cacheOnly = false,
+): Promise<SourceResult> {
   // חיפוש חופשי (search/?query=) מתעלם מהמיקום ומחזיר מודעות אמריקאיות
   // בדולרים. כתובת מיקום ישראלית מחזירה מודעות בשקלים — אך הן ארציות,
   // כי רוב מפרסמי הנדל"ן בפייסבוק מכסים את כל הארץ. הסינון לעיר נעשה כאן.
-  const rows = await runActor(ACTORS.facebook, {
-    startUrls: [{ url: "https://www.facebook.com/marketplace/telaviv/propertyforsale" }],
-    resultsLimit: maxItems,
-  });
+  const rows = await runActor(
+    ACTORS.facebook,
+    {
+      startUrls: [{ url: "https://www.facebook.com/marketplace/telaviv/propertyforsale" }],
+      resultsLimit: maxItems,
+    },
+    240000,
+    cacheOnly,
+  );
   // חיפוש חופשי ב-Marketplace מחזיר גם רהיטים ורכבים, שמושכים את החציון
   // מטה עד לחוסר משמעות. שומרים רק פריטים שגם נראים כמו דירה בכותרת וגם
   // מתומחרים בטווח דירות סביר.
