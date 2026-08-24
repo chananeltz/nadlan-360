@@ -799,6 +799,39 @@ app.post("/api/change-password", (req, res) => {
   });
 });
 
+/**
+ * מצב הקרדיט ב-Apify.
+ *
+ * בלי זה, מקור שנחסם בגלל חריגה מהתקציב פשוט נעלם מהמסך בלי הסבר —
+ * וזה בדיוק מה שקרה בפועל. כאן מחזירים את המצב כדי שהממשק יוכל לומר
+ * למשתמש *למה* המקורות חסרים ומתי הם יחזרו.
+ */
+app.get("/api/credit", async (_req, res) => {
+  const token = process.env.APIFY_TOKEN;
+  if (!token) {
+    res.json({ configured: false });
+    return;
+  }
+  try {
+    const r = await fetch(`https://api.apify.com/v2/users/me/limits?token=${encodeURIComponent(token)}`, {
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!r.ok) throw new Error(`Apify limits ${r.status}`);
+    const d = await r.json();
+    const used = Number(d?.data?.current?.monthlyUsageUsd ?? 0);
+    const cap = Number(d?.data?.limits?.maxMonthlyUsageUsd ?? 0);
+    res.json({
+      configured: true,
+      usedUsd: Math.round(used * 100) / 100,
+      capUsd: cap || null,
+      exhausted: cap > 0 && used >= cap,
+    });
+  } catch (error: any) {
+    // כשלון בבדיקת הקרדיט אינו אמור להפיל את המסך — מדווחים ולא חוסמים.
+    res.json({ configured: true, unknown: true, error: String(error?.message || error) });
+  }
+});
+
 app.get("/api/auth-info", (_req, res) => {
   res.json({ serverAuth: true, user: currentUser(), usingDefaultPassword: isUsingDefaultPassword() });
 });

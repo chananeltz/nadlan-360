@@ -473,10 +473,15 @@ export interface BridgeResult {
   medianPricePerSqm: number | null;
 }
 
-/** בודק שהשרת זמין ושמוגדר בו טוקן Apify. */
+/**
+ * בודק שהשרת זמין ושמוגדר בו טוקן Apify.
+ *
+ * הפסקת זמן ארוכה בכוונה: באירוח בשכבה חינמית השרת נרדם אחרי חוסר פעילות,
+ * וההתעוררות אורכת חצי דקה. המתנה קצרה החזירה "השרת לא זמין" גם כשהכול תקין.
+ */
 export async function bridgeHealth(): Promise<boolean> {
   try {
-    const r = await fetch(`${API_BASE}/api/health`, { signal: AbortSignal.timeout(4000) });
+    const r = await fetch(`${API_BASE}/api/health`, { signal: AbortSignal.timeout(60000) });
     if (!r.ok) return false;
     const d = await r.json();
     return !!d?.hasApifyToken;
@@ -521,7 +526,8 @@ export async function serverLogin(user: string, pass: string): Promise<LoginResu
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ user, pass }),
-      signal: AbortSignal.timeout(8000),
+      // השרת עשוי להיות רדום — נותנים לו זמן להתעורר לפני שנכריז על כישלון.
+      signal: AbortSignal.timeout(60000),
     });
     const d = await r.json().catch(() => ({}));
     if (r.ok && d?.ok) return { ok: true, usingDefaultPassword: d.usingDefaultPassword };
@@ -548,13 +554,39 @@ export async function serverChangePassword(
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ user, currentPass, newPass }),
-      signal: AbortSignal.timeout(8000),
+      signal: AbortSignal.timeout(60000),
     });
     const d = await r.json().catch(() => ({}));
     if (r.ok && d?.ok) return { ok: true, note: d.note };
     return { ok: false, error: d?.error || "שינוי הסיסמה נכשל." };
   } catch {
     return { ok: false, offline: true, error: "השרת אינו זמין — לא ניתן לשנות סיסמה כרגע." };
+  }
+}
+
+// ---- מצב הקרדיט ב-Apify ----
+
+export interface CreditStatus {
+  configured: boolean;
+  usedUsd?: number;
+  capUsd?: number | null;
+  exhausted?: boolean;
+  unknown?: boolean;
+  /** true = השרת עצמו אינו זמין (אתר סטטי ללא שרת). */
+  offline?: boolean;
+}
+
+/**
+ * בודק כמה קרדיט נשאר. משמש להסביר למשתמש למה מקורות חסרים,
+ * במקום שהם פשוט ייעלמו מהמסך בלי הסבר.
+ */
+export async function fetchCreditStatus(): Promise<CreditStatus> {
+  try {
+    const r = await fetch(`${API_BASE}/api/credit`, { signal: AbortSignal.timeout(60000) });
+    if (!r.ok) return { configured: false, offline: true };
+    return (await r.json()) as CreditStatus;
+  } catch {
+    return { configured: false, offline: true };
   }
 }
 

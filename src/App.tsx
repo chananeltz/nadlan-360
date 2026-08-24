@@ -41,6 +41,7 @@ import {
   bridgeHealth,
   bridgeScrape,
   fetchMadlanAnalytics,
+  fetchCreditStatus,
   parseGushHelka,
   serverLogin,
   serverChangePassword,
@@ -50,6 +51,7 @@ import {
   type SocioEconomic,
   type BridgeResult,
   type MadlanAnalytics,
+  type CreditStatus,
 } from "./utils/govmapClient.ts";
 
 /**
@@ -301,6 +303,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
   const [uploaded, setUploaded] = useState<UploadedData | null>(null);
   const [liveSources, setLiveSources] = useState<BridgeResult[]>([]);
   const [madlan, setMadlan] = useState<MadlanAnalytics | null>(null);
+  const [credit, setCredit] = useState<CreditStatus | null>(null);
   const [liveLoading, setLiveLoading] = useState(false);
   const [query, setQuery] = useState("");
 
@@ -309,9 +312,26 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
   async function runBridge(city: string, street: string) {
     setLiveSources([]);
     setMadlan(null);
-    const up = await bridgeHealth();
-    if (!up) return; // אין שרת/טוקן — מדלגים בשקט ומציגים רק את רשות המסים
+    setCredit(null);
+    // מדליקים את המחוון כבר עכשיו: בשכבה חינמית השרת נרדם וההתעוררות
+    // אורכת עד חצי דקה, ובלי סימן חיים המסך נראה תקוע.
     setLiveLoading(true);
+    const up = await bridgeHealth();
+    if (!up) {
+      setLiveLoading(false);
+      // אין שרת — מסמנים זאת כדי שהממשק יסביר, במקום שהמקורות ייעלמו בשקט.
+      setCredit({ configured: false, offline: true });
+      return;
+    }
+
+    // בודקים קרדיט לפני השאיבה: אם הוא נגמר, כל המקורות ייכשלו ממילא,
+    // ועדיף לומר זאת מיד מאשר להמתין דקה לארבע שגיאות זהות.
+    const creditStatus = await fetchCreditStatus();
+    setCredit(creditStatus);
+    if (creditStatus.exhausted) {
+      setLiveLoading(false);
+      return;
+    }
 
     const listings = ["yad2", "yad1", "facebook"].map((s) =>
       bridgeScrape(s, city, street).then((res) => {
@@ -719,6 +739,11 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
               />
             )}
 
+            {/* הסבר כשמקורות המחיר-המבוקש אינם זמינים */}
+            {credit && !liveLoading && liveSources.length === 0 && !madlan && (
+              <SourcesStatusNotice credit={credit} />
+            )}
+
             {/* מחירי מבוקש חיים (יד2 · יד1 · פייסבוק) */}
             {(liveLoading || liveSources.length > 0) && (
               <LiveSourcesPanel
@@ -824,6 +849,69 @@ const SOURCE_LABEL: Record<string, string> = {
   yad1: "יד1",
   madlan: "מדלן PRO",
 };
+
+/* ---------- הסבר מצב המקורות ---------- */
+/**
+ * מקורות המחיר-המבוקש נכשלים בשקט כשאין שרת או כשנגמר הקרדיט, והמשתמש
+ * נשאר עם רשות המסים בלבד בלי לדעת למה. הפאנל הזה אומר את זה במפורש.
+ */
+function SourcesStatusNotice({ credit }: { credit: CreditStatus }) {
+  let title = "מקורות המחיר המבוקש אינם זמינים כרגע";
+  let body = "";
+  let link: { href: string; label: string } | null = null;
+
+  if (credit.offline || !credit.configured) {
+    body =
+      "השרת שמביא את יד2 / יד1 / מדלן / פייסבוק אינו זמין כרגע. נתוני רשות המסים שלמעלה עובדים תמיד ואינם תלויים בו.";
+  } else if (credit.exhausted) {
+    title = "נגמר הקרדיט החודשי ב-Apify";
+    body = `נוצל ${
+      credit.usedUsd != null ? `$${credit.usedUsd}` : "כל הסכום"
+    }${credit.capUsd ? ` מתוך $${credit.capUsd}` : ""}. הקרדיט החינמי מתחדש בתחילת מחזור החיוב הבא, ואז המקורות יחזרו לבד — או שאפשר לשדרג עכשיו.`;
+    link = { href: "https://console.apify.com/billing/subscription", label: "לניהול הקרדיט ב-Apify" };
+  } else if (credit.unknown) {
+    body = "לא הצלחנו לבדוק את מצב הקרדיט. נסו שוב בעוד רגע.";
+  } else {
+    // יש קרדיט והשרת עובד — פשוט אין מודעות באזור הזה.
+    title = "לא נמצאו מודעות באזור זה";
+    body = "המקורות פעילים, אך אין כרגע מודעות תואמות בעיר או ברחוב שחיפשתם.";
+  }
+
+  return (
+    <div className="glass-ios rounded-3xl p-5">
+      <div className="flex items-start gap-2.5">
+        <Info size={17} className="shrink-0 mt-0.5 text-amber-500" />
+        <div className="min-w-0">
+          <h3 className="font-bold text-slate-800 text-[14px]">{title}</h3>
+          <p className="text-[12.5px] text-slate-500 mt-1 leading-relaxed">{body}</p>
+          {credit.usedUsd != null && credit.capUsd ? (
+            <div className="mt-3 max-w-xs">
+              <div className="h-1.5 rounded-full bg-slate-200 overflow-hidden">
+                <div
+                  className="h-full rounded-full bg-amber-500"
+                  style={{ width: `${Math.min(100, (credit.usedUsd / credit.capUsd) * 100)}%` }}
+                />
+              </div>
+              <div className="text-[11px] text-slate-400 mt-1">
+                ${credit.usedUsd} מתוך ${credit.capUsd}
+              </div>
+            </div>
+          ) : null}
+          {link && (
+            <a
+              href={link.href}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-block mt-3 text-[12.5px] font-bold text-indigo-600 hover:text-indigo-700"
+            >
+              {link.label} ←
+            </a>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
 
 /* ---------- אנליטיקת מדלן ---------- */
 function MadlanPanel({ m, closingPpsm }: { m: MadlanAnalytics; closingPpsm: number | null }) {
