@@ -124,6 +124,16 @@ function floorTag(d: Deal): { label: string; cls: string } | null {
   return null;
 }
 
+/** מזהה פנטהאוז / דירת גן במודעת מחיר-מבוקש לפי הכותרת והכתובת. */
+function listingTypeTag(r: SourceListing): { label: string; cls: string } | null {
+  const t = `${r.title || ""} ${r.street || ""}`;
+  if (/פנטהאוז|פנטהאוס|דירת גג|גג/.test(t))
+    return { label: "פנטהאוז", cls: "bg-violet-50 text-violet-700 border-violet-200" };
+  if (/דירת גן|גינה/.test(t))
+    return { label: "דירת גן", cls: "bg-emerald-50 text-emerald-700 border-emerald-200" };
+  return null;
+}
+
 /** תווית קצרה לסיווג העסקה: חדש מקבלן / יד שנייה. */
 function saleClassTag(d: Deal): { label: string; cls: string } | null {
   if (d.saleClass === "new")
@@ -1314,7 +1324,12 @@ function dedupeListings(rows: SourceListing[]): { rows: SourceListing[]; removed
  */
 function SourceListingsTable({ sources }: { sources: BridgeResult[] }) {
   const [showAll, setShowAll] = useState(false);
-  const [filter, setFilter] = useState<string>("all");
+  const [filter, setFilter] = useState<string>("all"); // מקור
+  const [fromDate, setFromDate] = useState(""); // YYYY-MM-DD
+  const [toDate, setToDate] = useState("");
+  const [minPrice, setMinPrice] = useState(""); // ₪
+  const [maxPrice, setMaxPrice] = useState("");
+  const [typeFilter, setTypeFilter] = useState<"all" | "penthouse" | "garden">("all");
 
   const { all, removedDupes } = useMemo(() => {
     const rows: SourceListing[] = [];
@@ -1331,11 +1346,53 @@ function SourceListingsTable({ sources }: { sources: BridgeResult[] }) {
     return { all: deduped, removedDupes: removed };
   }, [sources]);
 
-  const shown = useMemo(
-    () => (filter === "all" ? all : all.filter((r) => r.source === filter)),
-    [all, filter],
-  );
+  // סינון לפי מקור · תאריך · מחיר · סוג (פנטהאוז/גן).
+  const shown = useMemo(() => {
+    const minP = minPrice ? Number(minPrice) : null;
+    const maxP = maxPrice ? Number(maxPrice) : null;
+    return all.filter((r) => {
+      if (filter !== "all" && r.source !== filter) return false;
+      if (fromDate && (!r.date || r.date < fromDate)) return false;
+      if (toDate && (!r.date || r.date > toDate)) return false;
+      if (minP != null && r.price < minP) return false;
+      if (maxP != null && r.price > maxP) return false;
+      if (typeFilter !== "all") {
+        const tag = listingTypeTag(r);
+        const want = typeFilter === "penthouse" ? "פנטהאוז" : "דירת גן";
+        if (tag?.label !== want) return false;
+      }
+      return true;
+    });
+  }, [all, filter, fromDate, toDate, minPrice, maxPrice, typeFilter]);
+
   const visible = showAll ? shown : shown.slice(0, 25);
+
+  // ממוצע (חציון) מחיר ומחיר למ"ר לפי מספר חדרים — על התוצאות המסוננות.
+  const byRooms = useMemo(() => {
+    const groups = new Map<number, SourceListing[]>();
+    for (const r of shown) {
+      if (r.rooms == null) continue;
+      (groups.get(r.rooms) ?? groups.set(r.rooms, []).get(r.rooms)!).push(r);
+    }
+    return Array.from(groups.entries())
+      .map(([rooms, rows]) => ({
+        rooms,
+        count: rows.length,
+        medianPrice: medianOf(rows.map((r) => r.price).filter((p) => p > 0)),
+        medianPpsm: medianOf(rows.map((r) => r.pricePerSqm).filter((n): n is number => n != null && n > 0)),
+      }))
+      .sort((a, b) => a.rooms - b.rooms);
+  }, [shown]);
+
+  const hasFilters = !!(fromDate || toDate || minPrice || maxPrice || typeFilter !== "all" || filter !== "all");
+  const clearFilters = () => {
+    setFilter("all");
+    setFromDate("");
+    setToDate("");
+    setMinPrice("");
+    setMaxPrice("");
+    setTypeFilter("all");
+  };
 
   const availableSources = useMemo(
     () => sources.filter((s) => s.listings?.length).map((s) => s.source),
@@ -1392,8 +1449,90 @@ function SourceListingsTable({ sources }: { sources: BridgeResult[] }) {
         })}
       </div>
 
+      {/* סינון סוג: פנטהאוז / דירת גן */}
+      <div className="flex flex-wrap gap-1.5 mb-3">
+        {([
+          { v: "all", label: "כל הסוגים" },
+          { v: "penthouse", label: "פנטהאוז" },
+          { v: "garden", label: "דירת גן" },
+        ] as const).map((opt) => (
+          <button
+            key={opt.v}
+            onClick={() => setTypeFilter(opt.v)}
+            className={`text-[12px] font-medium px-3 py-1.5 rounded-full border transition ${
+              typeFilter === opt.v ? "bg-indigo-600 text-white border-indigo-600" : "bg-white text-slate-600 border-slate-200"
+            }`}
+          >
+            {opt.label}
+          </button>
+        ))}
+      </div>
+
+      {/* סינון תאריך + מחיר */}
+      <div className="flex flex-wrap items-center gap-2 mb-3 text-[12px]">
+        <span className="text-slate-400">תאריך:</span>
+        <input
+          type="date"
+          value={fromDate}
+          max={toDate || undefined}
+          onChange={(e) => setFromDate(e.target.value)}
+          className="rounded-xl bg-slate-50 border border-slate-200 px-2.5 py-1.5 outline-none focus:border-indigo-400"
+          aria-label="מתאריך"
+        />
+        <span className="text-slate-400">—</span>
+        <input
+          type="date"
+          value={toDate}
+          min={fromDate || undefined}
+          onChange={(e) => setToDate(e.target.value)}
+          className="rounded-xl bg-slate-50 border border-slate-200 px-2.5 py-1.5 outline-none focus:border-indigo-400"
+          aria-label="עד תאריך"
+        />
+        <span className="text-slate-400 ms-2">מחיר ₪:</span>
+        <input
+          type="number"
+          inputMode="numeric"
+          placeholder="מ־"
+          value={minPrice}
+          onChange={(e) => setMinPrice(e.target.value)}
+          className="w-24 rounded-xl bg-slate-50 border border-slate-200 px-2.5 py-1.5 outline-none focus:border-indigo-400"
+          aria-label="מחיר מינימלי"
+        />
+        <input
+          type="number"
+          inputMode="numeric"
+          placeholder="עד"
+          value={maxPrice}
+          onChange={(e) => setMaxPrice(e.target.value)}
+          className="w-24 rounded-xl bg-slate-50 border border-slate-200 px-2.5 py-1.5 outline-none focus:border-indigo-400"
+          aria-label="מחיר מקסימלי"
+        />
+        {hasFilters && (
+          <button onClick={clearFilters} className="ms-1 text-[12px] font-medium text-indigo-600 hover:text-indigo-700">
+            נקה סינון
+          </button>
+        )}
+        <span className="text-slate-400 ms-auto">מוצג {nf.format(shown.length)} מתוך {nf.format(all.length)}</span>
+      </div>
+
+      {/* ממוצע (חציון) מחיר לפי חדרים — על התוצאות המסוננות */}
+      {byRooms.length > 0 && (
+        <div className="mb-3 rounded-2xl bg-slate-50/70 border border-slate-100 p-3">
+          <div className="text-[11.5px] font-bold text-slate-500 mb-2">מחיר חציוני לפי חדרים ({nf.format(shown.length)} מודעות)</div>
+          <div className="flex flex-wrap gap-2">
+            {byRooms.map((b) => (
+              <div key={b.rooms} className="rounded-xl bg-white border border-slate-200 px-3 py-1.5 text-center">
+                <div className="text-[11px] text-slate-400">{b.rooms} חד׳ · {b.count}</div>
+                <div className="text-[13px] font-bold text-slate-700">{shekel(b.medianPrice)}</div>
+                {b.medianPpsm > 0 && <div className="text-[10.5px] text-slate-400">{shekel(b.medianPpsm)}/מ״ר</div>}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       <div className="overflow-x-auto -mx-1">
-        <table className="w-full text-[12.5px] min-w-[560px]">
+        <table className="w-full text-[12.5px] min-w-[620px]">
           <thead>
             <tr className="text-slate-400 text-[11.5px] border-b border-slate-200">
               <th className="text-right font-bold py-2 px-1">תאריך</th>
@@ -1403,10 +1542,13 @@ function SourceListingsTable({ sources }: { sources: BridgeResult[] }) {
               <th className="text-right font-bold py-2 px-1">מ״ר</th>
               <th className="text-right font-bold py-2 px-1">מחיר</th>
               <th className="text-right font-bold py-2 px-1">₪/מ״ר</th>
+              <th className="text-right font-bold py-2 px-1">מיוחד</th>
             </tr>
           </thead>
           <tbody>
-            {visible.map((r, i) => (
+            {visible.map((r, i) => {
+              const tTag = listingTypeTag(r);
+              return (
               <tr key={`${r.source}-${i}`} className="border-b border-slate-100 hover:bg-slate-50/60 transition">
                 <td className="py-2 px-1 text-slate-500 whitespace-nowrap">{fmtDate(r.date)}</td>
                 <td className="py-2 px-1">
@@ -1442,11 +1584,25 @@ function SourceListingsTable({ sources }: { sources: BridgeResult[] }) {
                 <td className="py-2 px-1 text-slate-600 whitespace-nowrap">
                   {r.pricePerSqm ? shekel(r.pricePerSqm) : "—"}
                 </td>
+                <td className="py-2 px-1 whitespace-nowrap">
+                  {tTag ? (
+                    <span className={`inline-block text-[10.5px] rounded-full px-1.5 py-0.5 border ${tTag.cls}`}>
+                      {tTag.label}
+                    </span>
+                  ) : (
+                    <span className="text-slate-300">—</span>
+                  )}
+                </td>
               </tr>
-            ))}
+              );
+            })}
           </tbody>
         </table>
       </div>
+
+      {shown.length === 0 && (
+        <p className="text-[12.5px] text-slate-400 py-3 text-center">אין מודעות התואמות את הסינון. נסו לנקות חלק מהמסננים.</p>
+      )}
 
       {shown.length > 25 && (
         <button
