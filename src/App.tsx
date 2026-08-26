@@ -140,6 +140,49 @@ const EXAMPLES = [
   { city: "חיפה", street: "כרמל" },
 ];
 
+/**
+ * לוכד את אירוע ההתקנה של כרום (beforeinstallprompt) כדי שנוכל להציג
+ * כפתור "התקן אפליקציה" משלנו במקום להסתמך על הבאנר האוטומטי של הדפדפן.
+ */
+function useInstallPrompt() {
+  const [promptEvent, setPromptEvent] = useState<any>(null);
+  const [installed, setInstalled] = useState(false);
+
+  useEffect(() => {
+    const onBIP = (e: any) => {
+      e.preventDefault(); // מונע את הבאנר האוטומטי; נציג כפתור משלנו.
+      setPromptEvent(e);
+    };
+    const onInstalled = () => {
+      setInstalled(true);
+      setPromptEvent(null);
+    };
+    // כבר מותקן / רץ במצב אפליקציה — אין טעם להציע התקנה.
+    const standalone =
+      window.matchMedia?.("(display-mode: standalone)").matches ||
+      (navigator as any).standalone === true;
+    if (standalone) setInstalled(true);
+
+    window.addEventListener("beforeinstallprompt", onBIP);
+    window.addEventListener("appinstalled", onInstalled);
+    return () => {
+      window.removeEventListener("beforeinstallprompt", onBIP);
+      window.removeEventListener("appinstalled", onInstalled);
+    };
+  }, []);
+
+  const install = async () => {
+    if (!promptEvent) return;
+    promptEvent.prompt();
+    try {
+      await promptEvent.userChoice;
+    } catch {}
+    setPromptEvent(null);
+  };
+
+  return { canInstall: !!promptEvent && !installed, install };
+}
+
 export default function App() {
   const [authed, setAuthed] = useState(
     () => sessionStorage.getItem(AUTH_KEY) === "1",
@@ -321,6 +364,7 @@ function ChangePasswordCard({ defaultUser, onClose }: { defaultUser: string; onC
 
 /* ---------- הדשבורד ---------- */
 function Dashboard({ onLogout }: { onLogout: () => void }) {
+  const { canInstall, install } = useInstallPrompt();
   const [city, setCity] = useState("");
   const [street, setStreet] = useState("");
   // "both"=גם חדש וגם יד שנייה, כל עסקה מתויגת. ברירת מחדל: הכל.
@@ -573,6 +617,14 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
             <div className="text-[11px] text-slate-500">נתוני עסקאות אמת · רשות המסים</div>
           </div>
           {credit && <CreditMeter credit={credit} />}
+          {canInstall && (
+            <button
+              onClick={install}
+              className={`${credit ? "" : "ms-auto "}flex items-center gap-1.5 text-[13px] font-semibold text-white bg-indigo-600 hover:bg-indigo-700 active:scale-[.98] rounded-xl px-3 py-1.5 transition shadow-sm shadow-indigo-200`}
+            >
+              <Download size={15} /> התקן אפליקציה
+            </button>
+          )}
           <button
             onClick={onLogout}
             className="flex items-center gap-1.5 text-[13px] text-slate-500 hover:text-slate-800 rounded-xl px-2.5 py-1.5 transition"
