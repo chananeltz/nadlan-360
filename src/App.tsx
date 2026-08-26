@@ -47,6 +47,8 @@ import {
   serverLogin,
   serverChangePassword,
   scoreNeighborhoods,
+  seedSource,
+  seedMadlan,
   type Deal,
   type NeighborhoodScore,
   type DealStatistics,
@@ -414,6 +416,16 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
     setLiveLoading(true);
     const up = await bridgeHealth();
     if (!up) {
+      // אין שרת — מנסים seed מ-Git כדי שעדיין יוצג מה שנשמר, מכל מכשיר.
+      const [y2, y1, fb, md] = await Promise.all([
+        seedSource("yad2", city, street),
+        seedSource("yad1", city, street),
+        seedSource("facebook", city, street),
+        seedMadlan(city),
+      ]);
+      const seeded = [y2, y1, fb].filter((r): r is BridgeResult => !!r);
+      if (seeded.length) setLiveSources(seeded);
+      if (md) setMadlan(md);
       setLiveLoading(false);
       // אין שרת — מסמנים זאת כדי שהממשק יסביר, במקום שהמקורות ייעלמו בשקט.
       setCredit({ configured: false, offline: true });

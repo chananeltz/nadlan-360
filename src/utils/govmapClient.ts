@@ -616,6 +616,47 @@ export function clearLocalCache(): number {
   return n;
 }
 
+// ---- Seed מ-Git: מטמון קבוע המשותף לכל המכשירים ----
+/**
+ * נתונים שיוצאו פעם אחת מדפדפן והוכנסו ל-public/seed-cache.json (נכנס ל-Git).
+ * משמשים גיבוי כשאין מטמון מקומי והשרת אינו יכול לספק (נגמר הקרדיט או שהמטמון
+ * בזיכרון נמחק) — כך כל מכשיר, וכל משתמש, רואה את אותם נתונים בלי קרדיט
+ * ובלי תלות בשרת. המפתחות זהים למפתחות המטמון המקומי (LOCAL_CACHE_PREFIX + key).
+ */
+let seedPromise: Promise<Record<string, any>> | null = null;
+function loadSeed(): Promise<Record<string, any>> {
+  if (!seedPromise) {
+    const base = (import.meta as any).env?.BASE_URL || "/";
+    seedPromise = fetch(`${base}seed-cache.json`)
+      .then((r) => (r.ok ? r.json() : {}))
+      .catch(() => ({}));
+  }
+  return seedPromise;
+}
+async function readSeedCache<T>(fullKey: string): Promise<T | null> {
+  try {
+    const seed = await loadSeed();
+    return (seed[fullKey] as T) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** קורא מקור בודד מה-seed בלבד (בלי פנייה לשרת) — לשימוש כשהשרת אינו זמין. */
+export async function seedSource(
+  source: string,
+  city: string,
+  street: string,
+): Promise<BridgeResult | null> {
+  const cacheKey = `src_${source}_${city.trim()}_${street.trim()}`;
+  return readSeedCache<BridgeResult>(LOCAL_CACHE_PREFIX + cacheKey);
+}
+
+/** קורא אנליטיקת מדלן מה-seed בלבד. */
+export async function seedMadlan(city: string): Promise<MadlanAnalytics | null> {
+  return readSeedCache<MadlanAnalytics>(LOCAL_CACHE_PREFIX + `madlan_${city.trim()}`);
+}
+
 
 /**
  * בודק שהשרת זמין ושמוגדר בו טוקן Apify.
@@ -653,14 +694,18 @@ export async function bridgeScrape(
       city,
     )}&street=${encodeURIComponent(street)}${cacheOnly ? "&cacheOnly=1" : ""}`;
     const r = await fetch(url, { signal: AbortSignal.timeout(280000) });
-    if (!r.ok) return null;
-    const d = await r.json();
-    if (!d || d.error || !d.count) return null;
-    writeLocalCache(cacheKey, d);
-    return d as BridgeResult;
+    if (r.ok) {
+      const d = await r.json();
+      if (d && !d.error && d.count) {
+        writeLocalCache(cacheKey, d);
+        return d as BridgeResult;
+      }
+    }
   } catch {
-    return null;
+    // ממשיכים ל-seed
   }
+  // גיבוי seed מ-Git: נתונים שנשמרו פעם אחת, מוגשים לכל מכשיר בחינם.
+  return await readSeedCache<BridgeResult>(LOCAL_CACHE_PREFIX + cacheKey);
 }
 
 // ---- התחברות מול השרת ----
@@ -767,14 +812,18 @@ export async function fetchMadlanAnalytics(city: string, cacheOnly = false): Pro
     const r = await fetch(`${API_BASE}/api/sources/madlan?city=${encodeURIComponent(city)}${suffix}`, {
       signal: AbortSignal.timeout(280000),
     });
-    if (!r.ok) return null;
-    const d = await r.json();
-    if (!d || d.error) return null;
-    writeLocalCache(cacheKey, d);
-    return d as MadlanAnalytics;
+    if (r.ok) {
+      const d = await r.json();
+      if (d && !d.error) {
+        writeLocalCache(cacheKey, d);
+        return d as MadlanAnalytics;
+      }
+    }
   } catch {
-    return null;
+    // ממשיכים ל-seed
   }
+  // גיבוי seed מ-Git.
+  return await readSeedCache<MadlanAnalytics>(LOCAL_CACHE_PREFIX + cacheKey);
 }
 
 // ---- מדד חברתי-כלכלי (הלמ"ס דרך data.gov.il) ----
