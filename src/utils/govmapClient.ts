@@ -54,6 +54,10 @@ export interface Deal {
   propertyType: string;
   source: "same_building" | "street" | "neighborhood";
   distanceMeters: number;
+  /** סיווג העסקה: "new" = חדש מקבלן (dealType 1) · "second" = יד שנייה (dealType 2). */
+  saleClass?: "new" | "second";
+  /** קואורדינטת מרכז העסקה (Web Mercator / ITM) — לצורך מיקום על המפה. */
+  coord?: [number, number];
 }
 
 interface PolygonMeta {
@@ -230,7 +234,13 @@ function parseFloor(raw: RawDeal): number | null {
   return m ? parseInt(m[0], 10) : null;
 }
 
-function normalizeDeal(raw: RawDeal, source: Deal["source"], distance: number): Deal | null {
+function normalizeDeal(
+  raw: RawDeal,
+  source: Deal["source"],
+  distance: number,
+  saleClass?: Deal["saleClass"],
+  coord?: [number, number],
+): Deal | null {
   const price = Number(raw.dealAmount) || 0;
   if (!price) return null;
   const sqm = raw.assetArea ? Number(raw.assetArea) : null;
@@ -250,6 +260,8 @@ function normalizeDeal(raw: RawDeal, source: Deal["source"], distance: number): 
     propertyType: raw.propertyTypeDescription || raw.dealNatureDescription || "",
     source,
     distanceMeters: Math.round(distance),
+    saleClass,
+    coord,
   };
 }
 
@@ -292,8 +304,52 @@ export interface FindDealsOptions {
   yearsBack?: number;
   radius?: number;
   maxDeals?: number;
-  dealType?: number; // 1=חדש מקבלן, 2=יד שנייה
+  /** 1=חדש מקבלן · 2=יד שנייה · "both"=שניהם (כל עסקה מתויגת ב-saleClass). */
+  dealType?: 1 | 2 | "both";
   maxPolygons?: number;
+  /**
+   * טווח תאריכים מותאם (YYYY-MM או YYYY-MM-DD). כשמסופק — גובר על yearsBack.
+   * מאפשר למשתמש לבחור חלון מדויק במקום קפיצות של חצי שנה.
+   */
+  startDate?: string;
+  endDate?: string;
+}
+
+/** מנרמל שם רחוב להשוואת כפילויות: מסיר "רחוב"/"רח׳", פסיקים ורווחים כפולים. */
+function normStreetKey(s: string): string {
+  return String(s || "")
+    .replace(/רח['׳]?\s*/g, "")
+    .replace(/רחוב\s*/g, "")
+    .replace(/[",]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+/**
+ * מאחד עסקאות כפולות מרשות המסים. אותה דירה יכולה לחזור מפוליגונים שכנים,
+ * ובשליפת "both" אף בשני סיווגים — מה שנראה למשתמש ככפילות.
+ * מפתח הזיהוי: רחוב + מספר + חדרים + מ"ר + מחיר. מחיר זהה בדיוק לאותה דירה
+ * הוא כמעט בוודאות אותה עסקה (מכירה חוזרת אמיתית תהיה במחיר אחר), ולכן
+ * אפשר לאחד בלי לחשוש שנמזג שתי עסקאות לגיטימיות. נשמר המופע הראשון
+ * (הקרוב/העדכני ביותר לפי המיון הקיים).
+ */
+function dedupeDeals(deals: Deal[]): Deal[] {
+  const seen = new Set<string>();
+  const out: Deal[] = [];
+  for (const d of deals) {
+    const street = normStreetKey(d.street);
+    // בלי מחיר וגם בלי שטח אין די מידע לזהות כפילות — משאירים כמות שהוא.
+    if (!d.price || (!street && d.sqm == null)) {
+      out.push(d);
+      continue;
+    }
+    const key = `${street}|${d.houseNumber}|${d.rooms ?? ""}|${d.sqm ?? ""}|${d.price}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(d);
+  }
+  return out;
 }
 
 /**
@@ -365,13 +421,17 @@ export async function findRecentDealsForAddress(
     .sort((a, b) => a.distance - b.distance)
     .slice(0, maxPolygons);
 
-  // טווח תאריכים
+  // טווח תאריכים — טווח מותאם (startDate/endDate) גובר על yearsBack.
   const now = new Date(); // מותר כאן — קוד שרת רץ בזמן אמת
   const from = new Date(now);
   // נספר בחודשים ולא בשנים, כדי לתמוך בחצאי שנים (0.5 → 6 חודשים).
   from.setMonth(now.getMonth() - Math.round(yearsBack * 12));
-  const startDate = from.toISOString().slice(0, 7);
-  const endDate = now.toISOString().slice(0, 7);
+  // ה-API עובד ברזולוציית חודש (YYYY-MM); חותכים כל קלט לחודש.
+  const startDate = (options.startDate || from.toISOString()).slice(0, 7);
+  const endDate = (options.endDate || now.toISOString()).slice(0, 7);
+
+  // אילו סוגי עסקה לשלוף: "both" → גם חדש וגם יד שנייה, כל אחד מתויג.
+  const dealTypes: (1 | 2)[] = dealType === "both" ? [1, 2] : [dealType];
 
   const searchAddr = address.toLowerCase().trim();
   const seen = new Set<string>();
@@ -379,47 +439,53 @@ export async function findRecentDealsForAddress(
 
   for (const poly of polyList) {
     if (collected.length >= maxDeals) break;
-    try {
-      const streetRaw = await getPolygonDeals("street-deals", poly.polygon_id, {
-        limit: Math.max(1, Math.floor(maxDeals / 2)),
-        dealType,
-        startDate,
-        endDate,
-      });
-      for (const raw of streetRaw) {
-        const key = `${raw.objectid}_${raw.dealDate}`;
-        if (seen.has(key)) continue;
-        seen.add(key);
-        const centroid = parsePoint(raw.shape) || shapeCentroid(raw.shape) || point;
-        const dist = distanceMeters(point, centroid);
-        const street = (raw.streetNameHeb || raw.streetName || "").toLowerCase().trim();
-        const house = String(raw.houseNum || raw.houseNumber || "").trim();
-        const dealAddr = `${street} ${house}`.trim();
-        const sameBuilding = dealAddr.length > 0 && searchAddr.includes(street) && !!house && searchAddr.includes(house);
-        const d = normalizeDeal(raw, sameBuilding ? "same_building" : "street", dist);
-        if (d) collected.push(d);
-      }
-
-      if (collected.length < maxDeals) {
-        const hoodRaw = await getPolygonDeals("neighborhood-deals", poly.polygon_id, {
-          limit: Math.max(1, Math.floor(maxDeals / 4)),
-          dealType,
+    // כל פוליגון נשאב פעם אחת לכל סוג עסקה מבוקש. עסקה שייכת לסוג אחד בלבד,
+    // ולכן דה-דופ לפי objectid מונע ספירה כפולה גם כששולפים את שניהם.
+    for (const dt of dealTypes) {
+      if (collected.length >= maxDeals) break;
+      const saleClass: Deal["saleClass"] = dt === 1 ? "new" : "second";
+      try {
+        const streetRaw = await getPolygonDeals("street-deals", poly.polygon_id, {
+          limit: Math.max(1, Math.floor(maxDeals / 2)),
+          dealType: dt,
           startDate,
           endDate,
         });
-        for (const raw of hoodRaw) {
+        for (const raw of streetRaw) {
           const key = `${raw.objectid}_${raw.dealDate}`;
           if (seen.has(key)) continue;
           seen.add(key);
           const centroid = parsePoint(raw.shape) || shapeCentroid(raw.shape) || point;
           const dist = distanceMeters(point, centroid);
-          const d = normalizeDeal(raw, "neighborhood", dist);
+          const street = (raw.streetNameHeb || raw.streetName || "").toLowerCase().trim();
+          const house = String(raw.houseNum || raw.houseNumber || "").trim();
+          const dealAddr = `${street} ${house}`.trim();
+          const sameBuilding = dealAddr.length > 0 && searchAddr.includes(street) && !!house && searchAddr.includes(house);
+          const d = normalizeDeal(raw, sameBuilding ? "same_building" : "street", dist, saleClass, centroid);
           if (d) collected.push(d);
         }
+
+        if (collected.length < maxDeals) {
+          const hoodRaw = await getPolygonDeals("neighborhood-deals", poly.polygon_id, {
+            limit: Math.max(1, Math.floor(maxDeals / 4)),
+            dealType: dt,
+            startDate,
+            endDate,
+          });
+          for (const raw of hoodRaw) {
+            const key = `${raw.objectid}_${raw.dealDate}`;
+            if (seen.has(key)) continue;
+            seen.add(key);
+            const centroid = parsePoint(raw.shape) || shapeCentroid(raw.shape) || point;
+            const dist = distanceMeters(point, centroid);
+            const d = normalizeDeal(raw, "neighborhood", dist, saleClass, centroid);
+            if (d) collected.push(d);
+          }
+        }
+      } catch {
+        // דילוג על סוג/פוליגון שנכשל, ממשיכים לבא
+        continue;
       }
-    } catch {
-      // דילוג על פוליגון שנכשל, ממשיכים לבא
-      continue;
     }
   }
 
@@ -437,7 +503,8 @@ export async function findRecentDealsForAddress(
     return (b.date || "").localeCompare(a.date || "");
   });
 
-  return filtered.slice(0, maxDeals);
+  // איחוד כפילויות (אותה דירה מפוליגונים שכנים / משני סיווגים ב-"both").
+  return dedupeDeals(filtered).slice(0, maxDeals);
 }
 
 // ---- סטטיסטיקה ----
@@ -894,4 +961,142 @@ export function calculateStatistics(deals: Deal[]): DealStatistics {
     byRooms,
     dateRange: dates.length ? { from: dates[0], to: dates[dates.length - 1] } : null,
   };
+}
+
+// ---- מפת הזדמנויות: ניקוד שכונות ----
+
+/**
+ * ציון אטרקטיביות לשכונה — מאחד את כל הפרמטרים למספר אחד להחלטה.
+ * שקוף בכוונה: כל רכיב מוסבר ב-reasons, כדי שאיש כספים יבין למה שכונה
+ * קיבלה את הציון שלה ולא יסתמך על "קופסה שחורה".
+ */
+export interface NeighborhoodScore {
+  neighborhood: string;
+  city: string;
+  count: number;
+  medianPrice: number;
+  medianPpsm: number | null;
+  trendPct: number | null; // שינוי שנתי במחיר למ"ר (אם יש מספיק שנים)
+  groundShare: number; // אחוז קומת קרקע/גן
+  penthouseShare: number; // אחוז פנטהאוז/גג
+  newShare: number; // אחוז חדש מקבלן
+  coord: [number, number] | null; // מרכז השכונה (מרקטור) למיקום על המפה
+  score: number; // 0–100
+  tier: "hot" | "warm" | "cool";
+  reasons: string[];
+}
+
+const GROUND_RE = /קרקע|דירת גן|גינה/;
+const PENTHOUSE_RE = /פנטהאוז|פנטהאוס|דירת גג|גג/;
+
+/** נירמול min-max לרשימת ערכים; כשכולם שווים מחזיר 0.5 לכולם (ניטרלי). */
+function minMaxNorm(values: (number | null)[]): (number | null)[] {
+  const nums = values.filter((v): v is number => v != null);
+  if (!nums.length) return values.map(() => null);
+  const min = Math.min(...nums);
+  const max = Math.max(...nums);
+  if (max === min) return values.map((v) => (v == null ? null : 0.5));
+  return values.map((v) => (v == null ? null : (v - min) / (max - min)));
+}
+
+/** שינוי שנתי במחיר למ"ר בתוך קבוצת עסקאות (חיובי = עלייה). null אם אין 2 שנים. */
+function trendOf(group: Deal[]): number | null {
+  const byYear = new Map<string, number[]>();
+  for (const d of group) {
+    if (d.pricePerSqm && d.pricePerSqm > 0 && d.date) {
+      const y = d.date.slice(0, 4);
+      (byYear.get(y) ?? byYear.set(y, []).get(y)!).push(d.pricePerSqm);
+    }
+  }
+  const pts = Array.from(byYear.entries())
+    .map(([y, arr]) => ({ y, m: median(arr) }))
+    .sort((a, b) => a.y.localeCompare(b.y));
+  if (pts.length < 2) return null;
+  const first = pts[0].m;
+  const last = pts[pts.length - 1].m;
+  const years = Math.max(1, parseInt(pts[pts.length - 1].y) - parseInt(pts[0].y));
+  return first > 0 ? Math.round(((last - first) / first / years) * 1000) / 10 : null;
+}
+
+/**
+ * מקבץ עסקאות לפי שכונה ומדרג לפי מדד הזדמנות משוקלל.
+ * המדד: מומנטום מחיר (45%) + נזילות/היקף עסקאות (30%) + מרווח מחיר —
+ * ככל שמחיר המ"ר נמוך יותר יש יותר מקום לעליית ערך (25%). הכל מנורמל
+ * יחסית לשכונות שנמצאו בחיפוש הזה, ולכן הציון הוא השוואתי בין האזורים.
+ */
+export function scoreNeighborhoods(deals: Deal[]): NeighborhoodScore[] {
+  // בוחרים את רמת הקיבוץ שנותנת יותר הבחנה: שכונה או רחוב. govmap לעיתים
+  // מסווג רחובות רבים תחת שכונה אחת (למשל "לב העיר"), ואז קיבוץ לפי רחוב
+  // הוא שמייצר אזורים בני-השוואה.
+  const distinct = (fn: (d: Deal) => string) =>
+    new Set(deals.map(fn).map((s) => s.trim()).filter(Boolean)).size;
+  const useStreet = distinct((d) => d.street) > distinct((d) => d.neighborhood);
+  const areaKey = (d: Deal) =>
+    (useStreet ? d.street || d.neighborhood : d.neighborhood || d.street || d.city || "כללי").trim() || "כללי";
+
+  const groups = new Map<string, Deal[]>();
+  for (const d of deals) {
+    const key = areaKey(d);
+    (groups.get(key) ?? groups.set(key, []).get(key)!).push(d);
+  }
+
+  const base = Array.from(groups.entries())
+    .map(([neighborhood, group]) => {
+      const ppsm = group.map((d) => d.pricePerSqm).filter((n): n is number => n != null && n > 0);
+      const coords = group.map((d) => d.coord).filter((c): c is [number, number] => !!c);
+      const coord: [number, number] | null = coords.length
+        ? [
+            coords.reduce((s, c) => s + c[0], 0) / coords.length,
+            coords.reduce((s, c) => s + c[1], 0) / coords.length,
+          ]
+        : null;
+      return {
+        neighborhood,
+        city: group[0]?.city || "",
+        count: group.length,
+        medianPrice: median(group.map((d) => d.price).filter((p) => p > 0)),
+        medianPpsm: ppsm.length ? median(ppsm) : null,
+        trendPct: trendOf(group),
+        groundShare: group.filter((d) => GROUND_RE.test(d.propertyType || "")).length / group.length,
+        penthouseShare: group.filter((d) => PENTHOUSE_RE.test(d.propertyType || "")).length / group.length,
+        newShare: group.filter((d) => d.saleClass === "new").length / group.length,
+        coord,
+      };
+    })
+    // שכונה עם עסקה בודדת אינה מדגם — לא מדרגים אותה.
+    .filter((n) => n.count >= 2);
+
+  if (!base.length) return [];
+
+  // נירמול הרכיבים יחסית לשכונות שנמצאו.
+  const nMomentum = minMaxNorm(base.map((n) => n.trendPct));
+  const nLiquidity = minMaxNorm(base.map((n) => n.count));
+  // מרווח מחיר: מחיר נמוך = מרווח גבוה, ולכן היפוך.
+  const nPpsm = minMaxNorm(base.map((n) => n.medianPpsm));
+
+  const scored: NeighborhoodScore[] = base.map((n, i) => {
+    const momentum = nMomentum[i] ?? 0.5;
+    const liquidity = nLiquidity[i] ?? 0.5;
+    const headroom = nPpsm[i] == null ? 0.5 : 1 - (nPpsm[i] as number);
+    const raw = 0.45 * momentum + 0.3 * liquidity + 0.25 * headroom;
+    const score = Math.round(raw * 100);
+
+    const reasons: string[] = [];
+    if (n.trendPct != null && momentum >= 0.66) reasons.push(`מגמת מחיר חזקה (+${n.trendPct}%/שנה)`);
+    else if (n.trendPct != null && momentum <= 0.33) reasons.push(`מגמת מחיר חלשה (${n.trendPct}%/שנה)`);
+    if (liquidity >= 0.66) reasons.push(`שוק פעיל (${n.count} עסקאות)`);
+    else if (liquidity <= 0.33) reasons.push(`מעט עסקאות (${n.count})`);
+    if (headroom >= 0.66) reasons.push("מחיר למ״ר נמוך יחסית — מרווח לעליית ערך");
+    else if (headroom <= 0.33) reasons.push("מחיר למ״ר גבוה יחסית לאזור");
+    if (n.groundShare >= 0.25) reasons.push("ריכוז דירות קרקע/גן");
+
+    return {
+      ...n,
+      score,
+      tier: score >= 66 ? "hot" : score >= 40 ? "warm" : "cool",
+      reasons,
+    };
+  });
+
+  return scored.sort((a, b) => b.score - a.score);
 }

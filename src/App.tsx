@@ -46,7 +46,9 @@ import {
   parseGushHelka,
   serverLogin,
   serverChangePassword,
+  scoreNeighborhoods,
   type Deal,
+  type NeighborhoodScore,
   type DealStatistics,
   type InvestmentAnalysis,
   type SocioEconomic,
@@ -102,6 +104,33 @@ interface UploadedData {
   count: number;
   medianPrice: number;
   medianPricePerSqm: number | null;
+}
+
+/**
+ * מזהה דירת גן / פנטהאוז-גג לפי סוג הנכס והקומה.
+ * סוג הנכס של רשות המסים הוא המקור המהימן ("דירת גן", "פנטהאוז", "דירת גג");
+ * קומה 0 ומטה היא סימן משלים לדירת גן. פנטהאוז אי אפשר להסיק מהקומה לבדה
+ * (אין לנו את גובה הבניין), ולכן נשענים על סוג הנכס בלבד.
+ */
+function floorTag(d: Deal): { label: string; cls: string } | null {
+  const t = d.propertyType || "";
+  if (/פנטהאוז|פנטהאוס|דירת גג|גג/.test(t))
+    return { label: "פנטהאוז", cls: "bg-violet-50 text-violet-700 border-violet-200" };
+  if (/דירת גן|גינה/.test(t))
+    return { label: "דירת גן", cls: "bg-emerald-50 text-emerald-700 border-emerald-200" };
+  // רשות המסים לרוב לא מדווחת מספר קומה, אבל סוג הנכס "קרקע" מציין קומת קרקע.
+  if (/קרקע/.test(t) || (d.floor != null && d.floor <= 0))
+    return { label: "קומת קרקע", cls: "bg-emerald-50 text-emerald-700 border-emerald-200" };
+  return null;
+}
+
+/** תווית קצרה לסיווג העסקה: חדש מקבלן / יד שנייה. */
+function saleClassTag(d: Deal): { label: string; cls: string } | null {
+  if (d.saleClass === "new")
+    return { label: "חדש מקבלן", cls: "bg-sky-50 text-sky-700 border-sky-200" };
+  if (d.saleClass === "second")
+    return { label: "יד שנייה", cls: "bg-slate-100 text-slate-600 border-slate-200" };
+  return null;
 }
 
 const EXAMPLES = [
@@ -294,8 +323,13 @@ function ChangePasswordCard({ defaultUser, onClose }: { defaultUser: string; onC
 function Dashboard({ onLogout }: { onLogout: () => void }) {
   const [city, setCity] = useState("");
   const [street, setStreet] = useState("");
-  const [dealType, setDealType] = useState<1 | 2>(2); // 2=יד שנייה, 1=חדש מקבלן
+  // "both"=גם חדש וגם יד שנייה, כל עסקה מתויגת. ברירת מחדל: הכל.
+  const [dealType, setDealType] = useState<1 | 2 | "both">("both");
   const [yearsBack, setYearsBack] = useState(3); // חצי שנה עד 3 שנים
+  // טווח תאריכים מותאם (YYYY-MM). כשפעיל — גובר על yearsBack.
+  const [customRange, setCustomRange] = useState(false);
+  const [fromMonth, setFromMonth] = useState("");
+  const [toMonth, setToMonth] = useState("");
   const [gushHelka, setGushHelka] = useState(""); // רשות המסים בלבד
   const [hideSubsidized, setHideSubsidized] = useState(true); // הסתר מחיר למשתכן/חריגים
   const [loading, setLoading] = useState(false);
@@ -385,6 +419,12 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
     [shownDeals],
   );
 
+  // מפת הזדמנויות — ניקוד שכונות מכל הפרמטרים יחד.
+  const hoods: NeighborhoodScore[] = useMemo(
+    () => (shownDeals && shownDeals.length ? scoreNeighborhoods(shownDeals) : []),
+    [shownDeals],
+  );
+
   const roomsChart = useMemo(() => {
     if (!stats) return [];
     return Object.entries(stats.byRooms)
@@ -398,7 +438,14 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
       .sort((a, b) => a.roomsNum - b.roomsNum);
   }, [stats]);
 
-  async function runSearch(c = city, s = street, dt = dealType, yb = yearsBack, gh = gushHelka) {
+  async function runSearch(
+    c = city,
+    s = street,
+    dt = dealType,
+    yb = yearsBack,
+    gh = gushHelka,
+    range = customRange ? { from: fromMonth, to: toMonth } : null,
+  ) {
     const cityClean = c.trim();
     const streetClean = s.trim();
     const gushClean = gh.trim();
@@ -432,16 +479,20 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
       runBridge(cityClean, streetClean);
     }
     try {
+      // טווח מותאם פעיל רק כששני הצדדים מולאו; אחרת נשענים על yearsBack.
+      const useRange = !!(range && range.from && range.to);
       const result = await findRecentDealsForAddress(q, {
         yearsBack: yb,
         // גוש/חלקה → רדיוס צר מאוד; כתובת מדויקת → צר; שכונה/עיר → רחב
         radius: parsedGush ? 200 : /\d/.test(streetClean) ? 250 : streetClean ? 450 : 600,
         maxDeals: 100,
         dealType: dt,
+        ...(useRange ? { startDate: range!.from, endDate: range!.to } : {}),
       });
       setDeals(result);
       if (result.length === 0) {
-        setError(`לא נמצאו עסקאות מדווחות באזור זה ב-${rangeLabel(yb)} האחרונות. נסו טווח ארוך יותר או אזור סמוך.`);
+        const scope = useRange ? "בטווח שנבחר" : `ב-${rangeLabel(yb)} האחרונות`;
+        setError(`לא נמצאו עסקאות מדווחות באזור זה ${scope}. נסו טווח ארוך יותר או אזור סמוך.`);
       }
     } catch (e: any) {
       setError(e?.message || "אירעה שגיאה בשליפת הנתונים. נסו שוב בעוד רגע.");
@@ -462,6 +513,8 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
       "חדרים": d.rooms ?? "",
       'שטח (מ"ר)': d.sqm ?? "",
       "קומה": d.floor ?? "",
+      "מיוחד": floorTag(d)?.label ?? "",
+      "יד ראשונה/שנייה": d.saleClass === "new" ? "חדש מקבלן" : d.saleClass === "second" ? "יד שנייה" : "",
       "מחיר (₪)": d.price,
       'מחיר למ"ר (₪)': d.pricePerSqm ?? "",
       "סוג נכס": d.propertyType,
@@ -620,17 +673,70 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
               </label>
             </div>
 
+            {/* טווח תאריכים מותאם — מדליק שדות "מ / עד" ומתעלם מהתפריט הקבוע */}
+            <div className="mt-2.5">
+              <label className="flex items-center gap-2 cursor-pointer select-none w-fit">
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={customRange}
+                  onClick={() => setCustomRange((v) => !v)}
+                  className={`relative w-10 h-6 rounded-full transition ${customRange ? "bg-indigo-600" : "bg-slate-300"}`}
+                >
+                  <span
+                    className={`absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-all ${customRange ? "right-0.5" : "right-[18px]"}`}
+                  />
+                </button>
+                <span className="text-[13px] text-slate-600">טווח תאריכים מותאם</span>
+              </label>
+
+              {customRange && (
+                <div className="mt-2.5 flex flex-col sm:flex-row items-stretch sm:items-center gap-2.5">
+                  <label className="flex-1 flex items-center gap-2 rounded-2xl bg-slate-50 border border-slate-200 px-3.5 focus-within:border-indigo-400 focus-within:ring-2 focus-within:ring-indigo-100 transition">
+                    <span className="text-[13px] text-slate-500 shrink-0">מ־</span>
+                    <input
+                      type="month"
+                      value={fromMonth}
+                      max={toMonth || undefined}
+                      onChange={(e) => setFromMonth(e.target.value)}
+                      className="w-full bg-transparent py-3 outline-none text-[15px]"
+                      aria-label="מתאריך"
+                    />
+                  </label>
+                  <label className="flex-1 flex items-center gap-2 rounded-2xl bg-slate-50 border border-slate-200 px-3.5 focus-within:border-indigo-400 focus-within:ring-2 focus-within:ring-indigo-100 transition">
+                    <span className="text-[13px] text-slate-500 shrink-0">עד־</span>
+                    <input
+                      type="month"
+                      value={toMonth}
+                      min={fromMonth || undefined}
+                      onChange={(e) => setToMonth(e.target.value)}
+                      className="w-full bg-transparent py-3 outline-none text-[15px]"
+                      aria-label="עד תאריך"
+                    />
+                  </label>
+                  <button
+                    onClick={() => runSearch(city, street, dealType, yearsBack, gushHelka, { from: fromMonth, to: toMonth })}
+                    disabled={!fromMonth || !toMonth || loading}
+                    className="shrink-0 rounded-2xl bg-slate-800 hover:bg-slate-900 active:scale-[.98] disabled:opacity-50 text-white font-semibold px-5 py-3 text-[14px] transition"
+                  >
+                    החל טווח
+                  </button>
+                </div>
+              )}
+            </div>
+
             {/* בורר סוג עסקה */}
             <div className="mt-3 flex items-center justify-center gap-1 rounded-2xl bg-slate-100 p-1 w-fit mx-auto">
               {([
+                { v: "both", label: "הכל" },
                 { v: 2, label: "יד שנייה" },
                 { v: 1, label: "חדש מקבלן" },
               ] as const).map((opt) => (
                 <button
-                  key={opt.v}
+                  key={String(opt.v)}
                   onClick={() => {
                     setDealType(opt.v);
-                    if (city.trim()) runSearch(city, street, opt.v);
+                    if (city.trim() || street.trim() || gushHelka.trim()) runSearch(city, street, opt.v);
                   }}
                   className={`px-4 py-1.5 rounded-xl text-[13px] font-medium transition ${
                     dealType === opt.v ? "bg-white text-indigo-700 shadow-sm" : "text-slate-500 hover:text-slate-700"
@@ -788,6 +894,9 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
             {/* מדד השקעה */}
             {investment && <InvestmentPanel inv={investment} />}
 
+            {/* מפת הזדמנויות — כל הפרמטרים ביחד, ניקוד לכל שכונה */}
+            {hoods.length > 1 && <OpportunityMap hoods={hoods} />}
+
             {roomsChart.length > 0 && (
               <div className="glass-ios rounded-3xl p-5">
                 <h3 className="font-bold text-slate-800 mb-1">מחיר חציוני למ״ר לפי מספר חדרים</h3>
@@ -830,13 +939,18 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
                       <th className="font-medium px-4 py-2.5 whitespace-nowrap">כתובת</th>
                       <th className="font-medium px-4 py-2.5 whitespace-nowrap">חדרים</th>
                       <th className="font-medium px-4 py-2.5 whitespace-nowrap">מ״ר</th>
+                      <th className="font-medium px-4 py-2.5 whitespace-nowrap">קומה</th>
                       <th className="font-medium px-4 py-2.5 whitespace-nowrap">מחיר</th>
                       <th className="font-medium px-4 py-2.5 whitespace-nowrap">למ״ר</th>
+                      <th className="font-medium px-4 py-2.5 whitespace-nowrap">סוג</th>
                       <th className="font-medium px-4 py-2.5 whitespace-nowrap">מקור</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {shownDeals!.map((d, i) => (
+                    {shownDeals!.map((d, i) => {
+                      const fTag = floorTag(d);
+                      const sTag = saleClassTag(d);
+                      return (
                       <tr key={d.objectid + "_" + i} className="border-t border-slate-50 hover:bg-indigo-50/40 transition">
                         <td className="px-4 py-2.5 whitespace-nowrap text-slate-500">{d.date}</td>
                         <td className="px-4 py-2.5 whitespace-nowrap font-medium text-slate-700">
@@ -844,15 +958,33 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
                         </td>
                         <td className="px-4 py-2.5 whitespace-nowrap">{d.rooms ?? "—"}</td>
                         <td className="px-4 py-2.5 whitespace-nowrap">{d.sqm ?? "—"}</td>
+                        <td className="px-4 py-2.5 whitespace-nowrap">
+                          <span className="text-slate-600">{d.floor ?? "—"}</span>
+                          {fTag && (
+                            <span className={`ms-1.5 inline-block text-[10.5px] rounded-full px-1.5 py-0.5 border ${fTag.cls}`}>
+                              {fTag.label}
+                            </span>
+                          )}
+                        </td>
                         <td className="px-4 py-2.5 whitespace-nowrap font-semibold text-slate-800">{shekel(d.price)}</td>
                         <td className="px-4 py-2.5 whitespace-nowrap text-slate-500">{shekel(d.pricePerSqm)}</td>
+                        <td className="px-4 py-2.5 whitespace-nowrap">
+                          {sTag ? (
+                            <span className={`inline-block text-[11px] rounded-full px-2 py-0.5 border ${sTag.cls}`}>
+                              {sTag.label}
+                            </span>
+                          ) : (
+                            <span className="text-slate-300">—</span>
+                          )}
+                        </td>
                         <td className="px-4 py-2.5 whitespace-nowrap">
                           <span className="inline-block text-[11px] rounded-full bg-emerald-50 text-emerald-700 px-2 py-0.5 border border-emerald-100">
                             רשות המסים
                           </span>
                         </td>
                       </tr>
-                    ))}
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
@@ -874,6 +1006,148 @@ const SOURCE_LABEL: Record<string, string> = {
   yad1: "יד1",
   madlan: "מדלן PRO",
 };
+
+/* ---------- מפת הזדמנויות ---------- */
+const TIER_HEX: Record<NeighborhoodScore["tier"], string> = {
+  hot: "#10b981",
+  warm: "#f59e0b",
+  cool: "#94a3b8",
+};
+const TIER_LABEL: Record<NeighborhoodScore["tier"], string> = {
+  hot: "הזדמנות גבוהה",
+  warm: "בינונית",
+  cool: "נמוכה",
+};
+const TIER_CHIP: Record<NeighborhoodScore["tier"], string> = {
+  hot: "bg-emerald-50 text-emerald-700 border-emerald-200",
+  warm: "bg-amber-50 text-amber-700 border-amber-200",
+  cool: "bg-slate-100 text-slate-600 border-slate-200",
+};
+
+/**
+ * מפת הזדמנויות — מאחדת את כל הפרמטרים לציון אחד לכל שכונה, ומציגה
+ * מפת בועות (מיקום לפי קואורדינטות אמת, צבע=ציון, גודל=היקף עסקאות)
+ * לצד טבלה מדורגת. כלי החלטה: איפה שווה להתמקד בקרקע / פינוי-בינוי.
+ */
+function OpportunityMap({ hoods }: { hoods: NeighborhoodScore[] }) {
+  const mapped = hoods.filter((h) => h.coord);
+  const W = 640;
+  const H = 380;
+  const pad = 46;
+
+  const layout = useMemo(() => {
+    if (!mapped.length) return [];
+    const xs = mapped.map((h) => h.coord![0]);
+    const ys = mapped.map((h) => h.coord![1]);
+    const minX = Math.min(...xs), maxX = Math.max(...xs);
+    const minY = Math.min(...ys), maxY = Math.max(...ys);
+    const maxCount = Math.max(...mapped.map((h) => h.count));
+    const sx = (v: number) => pad + ((v - minX) / (maxX - minX || 1)) * (W - 2 * pad);
+    const sy = (v: number) => H - pad - ((v - minY) / (maxY - minY || 1)) * (H - 2 * pad);
+    return mapped.map((h) => ({
+      h,
+      cx: sx(h.coord![0]),
+      cy: sy(h.coord![1]),
+      r: 12 + Math.sqrt(h.count / maxCount) * 24,
+    }));
+  }, [mapped]);
+
+  return (
+    <div className="glass-ios rounded-3xl p-5">
+      <div className="flex items-center gap-2 mb-1 flex-wrap">
+        <MapPin size={18} className="text-indigo-500" />
+        <h3 className="font-bold text-slate-800">מפת הזדמנויות — דירוג אזורים</h3>
+        <span className="text-[11px] text-slate-400">{hoods.length} אזורים · כל הפרמטרים בציון אחד</span>
+      </div>
+      <p className="text-[12px] text-slate-400 mb-4">
+        ציון משוקלל: מגמת מחיר (45%) · נזילות/היקף עסקאות (30%) · מרווח מחיר למ״ר (25%).
+        הציון השוואתי בין השכונות שנמצאו. כלי תמיכה בהחלטה — לא ייעוץ.
+      </p>
+
+      {layout.length > 0 && (
+        <div className="overflow-x-auto mb-4" dir="ltr">
+          <svg viewBox={`0 0 ${W} ${H}`} width="100%" className="min-w-[520px]" role="img" aria-label="מפת שכונות לפי ציון הזדמנות">
+            <rect x="0" y="0" width={W} height={H} rx="18" fill="#f8fafc" />
+            {layout.map(({ h, cx, cy, r }, i) => (
+              <g key={i}>
+                <circle cx={cx} cy={cy} r={r} fill={TIER_HEX[h.tier]} fillOpacity={0.28} stroke={TIER_HEX[h.tier]} strokeWidth={1.5} />
+                <text x={cx} y={cy + 4} textAnchor="middle" fontSize={13} fontWeight={700} fill="#0f172a">
+                  {h.score}
+                </text>
+                {(i < 6 || h.tier === "hot") && (
+                  <text x={cx} y={cy - r - 4} textAnchor="middle" fontSize={11} fill="#475569">
+                    {h.neighborhood.length > 14 ? h.neighborhood.slice(0, 13) + "…" : h.neighborhood}
+                  </text>
+                )}
+              </g>
+            ))}
+          </svg>
+        </div>
+      )}
+
+      <div className="flex flex-wrap gap-3 mb-3 text-[11.5px]">
+        {(["hot", "warm", "cool"] as const).map((t) => (
+          <span key={t} className="flex items-center gap-1.5">
+            <span className="w-3 h-3 rounded-full inline-block" style={{ background: TIER_HEX[t] }} />
+            <span className="text-slate-500">{TIER_LABEL[t]}</span>
+          </span>
+        ))}
+        <span className="text-slate-400">· גודל הבועה = היקף העסקאות</span>
+      </div>
+
+      <div className="overflow-x-auto -mx-1">
+        <table className="w-full text-[12.5px] min-w-[620px]">
+          <thead>
+            <tr className="text-slate-400 text-[11.5px] border-b border-slate-200">
+              <th className="text-right font-bold py-2 px-1">#</th>
+              <th className="text-right font-bold py-2 px-1">אזור</th>
+              <th className="text-right font-bold py-2 px-1">ציון</th>
+              <th className="text-right font-bold py-2 px-1">עסקאות</th>
+              <th className="text-right font-bold py-2 px-1">חציון ₪/מ״ר</th>
+              <th className="text-right font-bold py-2 px-1">מגמה</th>
+              <th className="text-right font-bold py-2 px-1">למה</th>
+            </tr>
+          </thead>
+          <tbody>
+            {hoods.map((h, i) => (
+              <tr key={h.neighborhood + i} className="border-b border-slate-100 hover:bg-slate-50/60 transition align-top">
+                <td className="py-2 px-1 text-slate-400">{i + 1}</td>
+                <td className="py-2 px-1 font-medium text-slate-700 whitespace-nowrap">
+                  {h.neighborhood}
+                  <span className={`ms-1.5 inline-block text-[10px] rounded-full px-1.5 py-0.5 border ${TIER_CHIP[h.tier]}`}>
+                    {TIER_LABEL[h.tier]}
+                  </span>
+                </td>
+                <td className="py-2 px-1">
+                  <div className="flex items-center gap-1.5">
+                    <div className="w-14 h-1.5 rounded-full bg-slate-200 overflow-hidden">
+                      <div className="h-full rounded-full" style={{ width: `${h.score}%`, background: TIER_HEX[h.tier] }} />
+                    </div>
+                    <span className="font-bold text-slate-700">{h.score}</span>
+                  </div>
+                </td>
+                <td className="py-2 px-1 text-slate-600">{h.count}</td>
+                <td className="py-2 px-1 text-slate-600 whitespace-nowrap">{h.medianPpsm ? shekel(h.medianPpsm) : "—"}</td>
+                <td className="py-2 px-1 whitespace-nowrap">
+                  {h.trendPct == null ? (
+                    <span className="text-slate-300">—</span>
+                  ) : (
+                    <span className={h.trendPct >= 0 ? "text-emerald-600" : "text-rose-600"}>
+                      {h.trendPct >= 0 ? "+" : ""}{h.trendPct}%
+                    </span>
+                  )}
+                </td>
+                <td className="py-2 px-1 text-slate-500 max-w-[220px]">
+                  {h.reasons.slice(0, 2).join(" · ") || "—"}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
 
 /* ---------- מחוון קרדיט ---------- */
 /**
@@ -924,6 +1198,65 @@ const SOURCE_STYLE: Record<string, string> = {
 };
 
 /**
+ * דירוג אמינות המקורות (נמוך = אמין יותר). כשאותה דירה מופיעה בכמה מקורות,
+ * שומרים את זה עם הדירוג הנמוך ביותר. יד2 מובנה עם שם רחוב; פייסבוק חופשי
+ * וארצי ולכן הכי פחות אמין.
+ */
+const SOURCE_RELIABILITY: Record<string, number> = { yad2: 0, yad1: 1, madlan: 1, facebook: 3 };
+const reliabilityRank = (src: string) => SOURCE_RELIABILITY[src] ?? 2;
+
+/** מנרמל שם רחוב להשוואה: מסיר "רחוב"/"רח׳", פסיקים, רווחים כפולים. */
+function normStreetClient(s: string): string {
+  return String(s || "")
+    .replace(/רח['׳]?\s*/g, "")
+    .replace(/רחוב\s*/g, "")
+    .replace(/[",]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+/**
+ * מפתח זיהוי אותה דירה בין מקורות: רחוב מנורמל + חדרים + מ"ר + דלי מחיר
+ * (10 אלף ₪). מחזיר null כשאין מספיק מידע כדי לומר בביטחון שזו כפילות —
+ * במקרה כזה המודעה נשמרת כמות שהיא.
+ */
+function listingDupKey(r: SourceListing): string | null {
+  if (!r.price) return null;
+  const street = normStreetClient(r.street);
+  const sqm = r.sqm ?? "";
+  // בלי רחוב וגם בלי שטח אי אפשר לטעון שזו אותה דירה.
+  if (!street && sqm === "") return null;
+  const priceBucket = Math.round(r.price / 10000);
+  return `${street}|${r.rooms ?? ""}|${sqm}|${priceBucket}`;
+}
+
+/**
+ * מאחד מודעות כפולות ממקורות שונים ומשאיר את המקור האמין יותר.
+ * מחזיר את הרשימה המאוחדת ואת מספר הכפילויות שהוסרו.
+ */
+function dedupeListings(rows: SourceListing[]): { rows: SourceListing[]; removed: number } {
+  const best = new Map<string, SourceListing>();
+  const passthrough: SourceListing[] = [];
+  let removed = 0;
+  for (const r of rows) {
+    const key = listingDupKey(r);
+    if (!key) {
+      passthrough.push(r);
+      continue;
+    }
+    const existing = best.get(key);
+    if (!existing) {
+      best.set(key, r);
+      continue;
+    }
+    removed++;
+    if (reliabilityRank(r.source) < reliabilityRank(existing.source)) best.set(key, r);
+  }
+  return { rows: [...passthrough, ...best.values()], removed };
+}
+
+/**
  * מאחד את המודעות מכל המקורות לרשימה אחת ממוינת לפי תאריך פרסום.
  * לכל שורה מסומן המקור, כדי שיהיה ברור מאיפה כל מחיר הגיע.
  */
@@ -931,16 +1264,19 @@ function SourceListingsTable({ sources }: { sources: BridgeResult[] }) {
   const [showAll, setShowAll] = useState(false);
   const [filter, setFilter] = useState<string>("all");
 
-  const all = useMemo(() => {
+  const { all, removedDupes } = useMemo(() => {
     const rows: SourceListing[] = [];
     for (const s of sources) if (s.listings) rows.push(...s.listings);
+    // איחוד כפילויות בין מקורות — נשמר המקור האמין יותר.
+    const { rows: deduped, removed } = dedupeListings(rows);
     // ללא תאריך — לסוף, אחרת המיון נראה שרירותי.
-    return rows.sort((a, b) => {
+    deduped.sort((a, b) => {
       if (!a.date && !b.date) return b.price - a.price;
       if (!a.date) return 1;
       if (!b.date) return -1;
       return b.date.localeCompare(a.date);
     });
+    return { all: deduped, removedDupes: removed };
   }, [sources]);
 
   const shown = useMemo(
@@ -966,9 +1302,15 @@ function SourceListingsTable({ sources }: { sources: BridgeResult[] }) {
         <FileUp size={18} className="text-indigo-500" />
         <h3 className="font-bold text-slate-800">כל המודעות שנמצאו</h3>
         <span className="text-[11px] text-slate-400">{nf.format(all.length)} מודעות · לפי תאריך פרסום</span>
+        {removedDupes > 0 && (
+          <span className="text-[11px] rounded-full bg-amber-50 text-amber-700 border border-amber-200 px-2 py-0.5">
+            {removedDupes} כפילויות אוחדו
+          </span>
+        )}
       </div>
       <p className="text-[12px] text-slate-400 mb-3">
         מחירי מבוקש מהמקורות החיים. ליד כל מודעה מצוין מאיזה מקור היא הגיעה.
+        {removedDupes > 0 && " מודעות שהופיעו בכמה מקורות אוחדו — הושאר המקור האמין יותר."}
       </p>
 
       <div className="flex flex-wrap gap-1.5 mb-3">
