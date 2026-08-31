@@ -320,8 +320,13 @@ function LoginGate({ onSuccess }: { onSuccess: () => void }) {
             disabled={busy}
             className="w-full flex items-center justify-center gap-2 rounded-2xl bg-indigo-600 hover:bg-indigo-700 active:scale-[.98] disabled:opacity-60 text-white font-semibold py-3.5 transition shadow-lg shadow-indigo-200"
           >
-            {busy ? <Loader2 size={18} className="animate-spin" /> : <Lock size={18} />} כניסה
+            {busy ? <Loader2 size={18} className="animate-spin" /> : <Lock size={18} />} {busy ? "מתחבר…" : "כניסה"}
           </button>
+          {busy && (
+            <p className="text-center text-[12px] text-slate-400">
+              אם השרת היה רדום, ההתחברות הראשונה עשויה לקחת עד דקה.
+            </p>
+          )}
 
           <button
             type="button"
