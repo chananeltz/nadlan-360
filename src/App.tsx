@@ -73,6 +73,44 @@ const nf = new Intl.NumberFormat("he-IL");
 const shekel = (n: number | null | undefined) =>
   n == null ? "—" : "₪" + nf.format(Math.round(n));
 
+/**
+ * מחירי האקטורים ב-Apify (לפי אתר הספק) — לחישוב עלות ויתרה.
+ * יד2: $5 ל-1,000 תוצאות · מדלן: $10 ל-1,000. יד1 משתמש באקטור של יד2 (מטמון),
+ * ופייסבוק משתנה — לכן האומדן מבוסס על יד2 (עיקר העלות) + מדלן.
+ */
+const APIFY_RATE = { yad2Per1000: 5, madlanPer1000: 10 };
+const EST_YAD2_RESULTS = 120; // כמות מודעות טיפוסית לשאיבת עיר
+const EST_COST_PER_SEARCH =
+  (EST_YAD2_RESULTS * APIFY_RATE.yad2Per1000) / 1000 + (1 * APIFY_RATE.madlanPer1000) / 1000; // ≈ $0.61
+
+const usd = (n: number) => "$" + (Math.round(n * 100) / 100).toFixed(2);
+
+/** יתרת קרדיט בדולרים, או null אם לא ידוע. */
+function creditRemaining(credit: CreditStatus | null): number | null {
+  if (!credit || !credit.configured || credit.capUsd == null) return null;
+  return Math.max(0, Math.round((credit.capUsd - (credit.usedUsd ?? 0)) * 100) / 100);
+}
+
+/** כמה חיפושי ערים חדשות נותרו לפי היתרה והמחיר הממוצע. */
+function searchesLeft(credit: CreditStatus | null): number | null {
+  const rem = creditRemaining(credit);
+  return rem == null ? null : Math.floor(rem / EST_COST_PER_SEARCH);
+}
+
+/** האם העיר/רחוב כבר שמורים במטמון המקומי (ואז השאיבה חינם). */
+function isCityCached(city: string, street: string): boolean {
+  try {
+    const c = city.trim();
+    const s = street.trim();
+    return (
+      localStorage.getItem(`nadlan360_cache_src_yad2_${c}_${s}`) != null ||
+      localStorage.getItem(`nadlan360_cache_madlan_${c}`) != null
+    );
+  } catch {
+    return false;
+  }
+}
+
 /** התאמת מין דקדוקי: "חצי שנה אחרונה" מול "3 שנים אחרונות". */
 function rangeSuffix(years: number): string {
   const plural = years >= 2 && years !== 2.5 ? "אחרונות" : "אחרונה";
@@ -381,7 +419,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
   const [street, setStreet] = useState("");
   // "both"=גם חדש וגם יד שנייה, כל עסקה מתויגת. ברירת מחדל: הכל.
   const [dealType, setDealType] = useState<1 | 2 | "both">("both");
-  const [yearsBack, setYearsBack] = useState(3); // חצי שנה עד 3 שנים
+  const [yearsBack, setYearsBack] = useState(0.5); // ברירת מחדל: הקצר ביותר (חצי שנה)
   // טווח תאריכים מותאם (YYYY-MM). כשפעיל — גובר על yearsBack.
   const [customRange, setCustomRange] = useState(false);
   const [fromMonth, setFromMonth] = useState("");
@@ -457,6 +495,8 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
     // הגיעה ממטמון ולא חויב עליה קרדיט.
     setFromCache(Date.now() - startedAt < 4000);
     setLiveLoading(false);
+    // מרעננים את היתרה אחרי השאיבה כדי להציג "כמה נשאר" מדויק.
+    fetchCreditStatus().then(setCredit).catch(() => {});
   }
 
   // סינון מחיר למשתכן / עסקאות חריגות: מסיר עסקאות שמחיר המ"ר בהן נמוך
@@ -820,6 +860,19 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
                 </button>
               ))}
             </div>
+
+            {/* חיווי עלות לפני החיפוש — כמה יעלה ומה נשאר */}
+            {credit && credit.configured && creditRemaining(credit) != null && (
+              <p className="mt-3 text-center text-[12px] text-slate-500">
+                {(() => {
+                  const cached = isCityCached(city, street);
+                  const left = searchesLeft(credit);
+                  const rem = creditRemaining(credit);
+                  if (cached) return <>העיר הזו כבר שמורה — החיפוש <b className="text-emerald-600">חינם</b>. יתרה: {usd(rem!)} (~{left} חיפושים חדשים)</>;
+                  return <>חיפוש עיר חדשה ≈ <b>{usd(EST_COST_PER_SEARCH)}</b> · יתרה: {usd(rem!)} (~<b>{left}</b> חיפושים) · מחירי מבוקש בלבד; רשות המסים חינם</>;
+                })()}
+              </p>
+            )}
           </div>
 
           {!deals && !loading && (
@@ -1235,6 +1288,8 @@ function CreditMeter({ credit }: { credit: CreditStatus }) {
   const cap = credit.capUsd || 0;
   const left = Math.max(0, Math.round((cap - used) * 100) / 100);
   const pct = cap > 0 ? Math.min(100, (used / cap) * 100) : 0;
+  const n = searchesLeft(credit); // כמה חיפושי ערים חדשות נותרו
+
   // מתחת לחמישית נותר — אדום; מתחת לחצי — כתום.
   const tone = left <= 0 ? "rose" : left / cap < 0.2 ? "amber" : "emerald";
   const barColor = tone === "rose" ? "bg-rose-500" : tone === "amber" ? "bg-amber-500" : "bg-emerald-500";
@@ -1253,7 +1308,7 @@ function CreditMeter({ credit }: { credit: CreditStatus }) {
           {left > 0 ? `נשאר $${left}` : "הקרדיט נגמר"}
         </div>
         <div className="text-[10px] text-slate-400">
-          נוצל ${used} מתוך ${cap}
+          {left > 0 && n != null ? `~${n} חיפושים · ` : ""}נוצל ${used} מתוך ${cap}
         </div>
       </div>
       <div className="w-14 h-1.5 rounded-full bg-slate-200 overflow-hidden">
