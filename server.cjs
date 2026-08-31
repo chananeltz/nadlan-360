@@ -175,7 +175,7 @@ function median(nums) {
   const m = Math.floor(s.length / 2);
   return s.length % 2 ? s[m] : Math.round((s[m - 1] + s[m]) / 2);
 }
-var CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1e3;
+var CACHE_TTL_MS = 420 * 60 * 60 * 1e3;
 var MAX_CACHE_ENTRIES = 300;
 var resultCache = /* @__PURE__ */ new Map();
 function pruneCache() {
@@ -212,9 +212,26 @@ var CacheMissError = class extends Error {
     this.name = "CacheMissError";
   }
 };
+function getTokens() {
+  const list = [];
+  if (process.env.APIFY_TOKENS) {
+    list.push(...process.env.APIFY_TOKENS.split(",").map((t) => t.trim()).filter(Boolean));
+  }
+  if (process.env.APIFY_TOKEN) list.push(process.env.APIFY_TOKEN.trim());
+  for (let i = 2; i <= 8; i++) {
+    const t = process.env[`APIFY_TOKEN_${i}`];
+    if (t && t.trim()) list.push(t.trim());
+  }
+  return [...new Set(list)];
+}
+var exhaustedTokens = /* @__PURE__ */ new Set();
+function isQuotaError(status, body) {
+  if (status === 402 || status === 403) return true;
+  return /usage|limit|exceeded|quota|payment|insufficient/i.test(body);
+}
 async function runActor(actor, input, timeoutMs = 24e4, cacheOnly = false) {
-  const token = process.env.APIFY_TOKEN;
-  if (!token && !cacheOnly) throw new Error("APIFY_TOKEN \u05D7\u05E1\u05E8 \u05D1\u05E7\u05D5\u05D1\u05E5 .env");
+  const allTokens = getTokens();
+  if (!allTokens.length && !cacheOnly) throw new Error("\u05D0\u05D9\u05DF \u05D8\u05D5\u05E7\u05DF Apify \u05DE\u05D5\u05D2\u05D3\u05E8 (APIFY_TOKEN)");
   const cacheKey = `${actor}|${JSON.stringify(input)}`;
   const cached2 = resultCache.get(cacheKey);
   if (cached2 && Date.now() - cached2.at < CACHE_TTL_MS) {
@@ -232,35 +249,50 @@ async function runActor(actor, input, timeoutMs = 24e4, cacheOnly = false) {
     }
   }
   if (cacheOnly) throw new CacheMissError(actor);
-  const url = `${APIFY_BASE}/${actor}/run-sync-get-dataset-items?token=${encodeURIComponent(token)}`;
-  let res = null;
+  const tokens = allTokens.filter((t) => !exhaustedTokens.has(t));
+  if (!tokens.length) {
+    throw new Error("\u05DB\u05DC \u05D7\u05E9\u05D1\u05D5\u05E0\u05D5\u05EA Apify \u05DE\u05D9\u05E6\u05D5 \u05D0\u05EA \u05D4\u05E7\u05E8\u05D3\u05D9\u05D8 \u05D4\u05D7\u05D5\u05D3\u05E9\u05D9. \u05D9\u05EA\u05D7\u05D3\u05E9 \u05D1\u05EA\u05D7\u05D9\u05DC\u05EA \u05D4\u05D7\u05D5\u05D3\u05E9 \u05D4\u05D1\u05D0.");
+  }
+  let data = null;
   let lastErr = null;
-  for (let attempt = 1; attempt <= 3; attempt++) {
-    try {
-      res = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(input),
-        signal: AbortSignal.timeout(timeoutMs)
-      });
-      break;
-    } catch (err) {
-      lastErr = err;
-      if (err?.name === "TimeoutError") break;
-      if (attempt < 3) await new Promise((r) => setTimeout(r, attempt * 1e3));
+  for (const token of tokens) {
+    const url = `${APIFY_BASE}/${actor}/run-sync-get-dataset-items?token=${encodeURIComponent(token)}`;
+    const tag = `...${token.slice(-4)}`;
+    let res = null;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        res = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(input),
+          signal: AbortSignal.timeout(timeoutMs)
+        });
+        break;
+      } catch (err) {
+        lastErr = err;
+        if (err?.name === "TimeoutError") break;
+        if (attempt < 3) await new Promise((r) => setTimeout(r, attempt * 1e3));
+      }
     }
+    if (!res) continue;
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      if (isQuotaError(res.status, body)) {
+        exhaustedTokens.add(token);
+        console.log(`[apify] \u05D7\u05E9\u05D1\u05D5\u05DF ${tag} \u05DE\u05D5\u05E6\u05D4 (${res.status}) \u2014 \u05E2\u05D5\u05D1\u05E8 \u05DC\u05D7\u05E9\u05D1\u05D5\u05DF \u05D4\u05D1\u05D0`);
+        continue;
+      }
+      lastErr = new Error(`Apify ${actor} \u05D4\u05D7\u05D6\u05D9\u05E8 ${res.status}: ${body.slice(0, 200)}`);
+      continue;
+    }
+    data = await res.json();
+    console.log(`[apify] \u05D7\u05D5\u05D9\u05D1 \u05E2\u05DC \u05D7\u05E9\u05D1\u05D5\u05DF ${tag}: ${actor}`);
+    break;
   }
-  if (!res) {
-    const cause = lastErr?.cause?.code || lastErr?.cause?.message || lastErr?.cause || "";
-    throw new Error(
-      `\u05D7\u05D9\u05D1\u05D5\u05E8 \u05DC-Apify \u05E0\u05DB\u05E9\u05DC (${actor}): ${lastErr?.name || ""} ${lastErr?.message || ""} ${cause}`.trim()
-    );
+  if (data == null) {
+    const cause = lastErr?.cause?.code || lastErr?.message || "\u05DB\u05DC \u05D4\u05D7\u05E9\u05D1\u05D5\u05E0\u05D5\u05EA \u05DE\u05D5\u05E6\u05D5/\u05E0\u05DB\u05E9\u05DC\u05D5";
+    throw new Error(`\u05D7\u05D9\u05D1\u05D5\u05E8 \u05DC-Apify \u05E0\u05DB\u05E9\u05DC (${actor}): ${cause}`.trim());
   }
-  if (!res.ok) {
-    const body = await res.text().catch(() => "");
-    throw new Error(`Apify ${actor} \u05D4\u05D7\u05D6\u05D9\u05E8 ${res.status}: ${body.slice(0, 200)}`);
-  }
-  const data = await res.json();
   const rows = (Array.isArray(data) ? data : []).map(stripPersonalData);
   resultCache.set(cacheKey, { at: Date.now(), rows });
   pruneCache();
@@ -516,7 +548,7 @@ var ai = apiKey ? new import_genai.GoogleGenAI({
     }
   }
 }) : null;
-function generateOfflineProfessionalReport(searchQuery, sources, isQuotaError, contextText, credentials) {
+function generateOfflineProfessionalReport(searchQuery, sources, isQuotaError2, contextText, credentials) {
   let basePrice = 24e3;
   const qLower = searchQuery.toLowerCase();
   if (qLower.includes("\u05EA\u05DC \u05D0\u05D1\u05D9\u05D1") || qLower.includes("\u05E4\u05DC\u05D5\u05E8\u05E0\u05D8\u05D9\u05DF") || qLower.includes("\u05E0\u05D5\u05D5\u05D4 \u05E6\u05D3\u05E7")) {
@@ -574,7 +606,7 @@ function generateOfflineProfessionalReport(searchQuery, sources, isQuotaError, c
 `;
     }
   }
-  const warningHeader = isQuotaError ? `> \u26A0\uFE0F **\u05E9\u05D9\u05DD \u05DC\u05D1:** \u05D4\u05EA\u05E7\u05D1\u05DC\u05D4 \u05E9\u05D2\u05D9\u05D0\u05EA \u05DE\u05DB\u05E1\u05D4 (Quota Exceeded - 429) \u05DE\u05E9\u05E8\u05EA\u05D9 \u05D4-AI \u05E9\u05DC Gemini. \u05DB\u05D3\u05D9 \u05DC\u05E9\u05DE\u05D5\u05E8 \u05E2\u05DC \u05E8\u05E6\u05D9\u05E4\u05D5\u05EA \u05E2\u05D1\u05D5\u05D3\u05D4, \u05D4\u05DE\u05E2\u05E8\u05DB\u05EA \u05E2\u05D1\u05E8\u05D4 \u05D1\u05D0\u05D5\u05E4\u05DF \u05D0\u05D5\u05D8\u05D5\u05DE\u05D8\u05D9 \u05DC\u05DE\u05E0\u05D5\u05E2 \u05E0\u05D9\u05EA\u05D5\u05D7 \u05E1\u05D9\u05DE\u05D5\u05DC\u05D8\u05D9\u05D1\u05D9 \u05DE\u05E7\u05D5\u05DE\u05D9 \u05D4\u05DE\u05D1\u05D5\u05E1\u05E1 \u05E2\u05DC \u05DE\u05D5\u05E0\u05D7\u05D9 \u05E0\u05EA\u05D5\u05E0\u05D9\u05DD \u05DE\u05D5\u05EA\u05D0\u05DE\u05D9\u05DD \u05E2\u05D1\u05D5\u05E8 **${searchQuery}**.
+  const warningHeader = isQuotaError2 ? `> \u26A0\uFE0F **\u05E9\u05D9\u05DD \u05DC\u05D1:** \u05D4\u05EA\u05E7\u05D1\u05DC\u05D4 \u05E9\u05D2\u05D9\u05D0\u05EA \u05DE\u05DB\u05E1\u05D4 (Quota Exceeded - 429) \u05DE\u05E9\u05E8\u05EA\u05D9 \u05D4-AI \u05E9\u05DC Gemini. \u05DB\u05D3\u05D9 \u05DC\u05E9\u05DE\u05D5\u05E8 \u05E2\u05DC \u05E8\u05E6\u05D9\u05E4\u05D5\u05EA \u05E2\u05D1\u05D5\u05D3\u05D4, \u05D4\u05DE\u05E2\u05E8\u05DB\u05EA \u05E2\u05D1\u05E8\u05D4 \u05D1\u05D0\u05D5\u05E4\u05DF \u05D0\u05D5\u05D8\u05D5\u05DE\u05D8\u05D9 \u05DC\u05DE\u05E0\u05D5\u05E2 \u05E0\u05D9\u05EA\u05D5\u05D7 \u05E1\u05D9\u05DE\u05D5\u05DC\u05D8\u05D9\u05D1\u05D9 \u05DE\u05E7\u05D5\u05DE\u05D9 \u05D4\u05DE\u05D1\u05D5\u05E1\u05E1 \u05E2\u05DC \u05DE\u05D5\u05E0\u05D7\u05D9 \u05E0\u05EA\u05D5\u05E0\u05D9\u05DD \u05DE\u05D5\u05EA\u05D0\u05DE\u05D9\u05DD \u05E2\u05D1\u05D5\u05E8 **${searchQuery}**.
 >
 ${accountsHeader}> \u05DC\u05D4\u05E4\u05E2\u05DC\u05D4 \u05DE\u05DC\u05D0\u05D4 \u05E9\u05DC \u05D7\u05D9\u05E4\u05D5\u05E9 \u05D1\u05D6\u05DE\u05DF \u05D0\u05DE\u05EA, \u05D0\u05E0\u05D0 \u05D5\u05D5\u05D3\u05D0 \u05E9\u05DE\u05E4\u05EA\u05D7 \u05D4-API \u05EA\u05E7\u05D9\u05DF \u05D5\u05DB\u05D5\u05DC\u05DC \u05D9\u05EA\u05E8\u05EA \u05E9\u05D9\u05DE\u05D5\u05E9 \u05EA\u05D7\u05EA \u05DC\u05D5\u05D7 \u05D4\u05D4\u05D2\u05D3\u05E8\u05D5\u05EA \u05D0\u05D5 \u05E0\u05E1\u05D4 \u05E9\u05D5\u05D1 \u05DE\u05D0\u05D5\u05D7\u05E8 \u05D9\u05D5\u05EA\u05E8.
 
@@ -909,8 +941,8 @@ ${contextText}`;
         });
       } catch (err) {
         const errMsg = (err.message || "").toLowerCase();
-        const isQuotaError2 = errMsg.includes("quota") || errMsg.includes("billing") || errMsg.includes("plan") || errMsg.includes("exhausted");
-        if (isQuotaError2) {
+        const isQuotaError3 = errMsg.includes("quota") || errMsg.includes("billing") || errMsg.includes("plan") || errMsg.includes("exhausted");
+        if (isQuotaError3) {
           throw err;
         }
         const isRetryable = errMsg.includes("429") || errMsg.includes("503") || errMsg.includes("unavailable") || errMsg.includes("limit") || errMsg.includes("demand");
@@ -991,7 +1023,7 @@ ${contextText}`;
   }
   console.log("[Gemini Fallback] Initializing high-fidelity local report engine.");
   const finalErrMsg = (lastError?.message || "").toLowerCase();
-  const isQuotaError = finalErrMsg.includes("quota") || finalErrMsg.includes("429") || finalErrMsg.includes("billing") || finalErrMsg.includes("plan") || finalErrMsg.includes("exhausted");
+  const isQuotaError2 = finalErrMsg.includes("quota") || finalErrMsg.includes("429") || finalErrMsg.includes("billing") || finalErrMsg.includes("plan") || finalErrMsg.includes("exhausted");
   const isChatQuery = searchQuery.includes("\u05E9\u05D0\u05DC\u05D4 \u05DC\u05D2\u05D1\u05D9 \u05E1\u05E7\u05E8 \u05D4\u05E9\u05D5\u05E7 \u05E9\u05DC");
   let offlineReport;
   if (isChatQuery) {
@@ -1007,7 +1039,7 @@ ${contextText}`;
     }
     offlineReport = generateOfflineChatResponse(userQuestion, searchQuery, region);
   } else {
-    offlineReport = generateOfflineProfessionalReport(searchQuery, sources, isQuotaError, contextText, credentials);
+    offlineReport = generateOfflineProfessionalReport(searchQuery, sources, isQuotaError2, contextText, credentials);
   }
   return {
     report: offlineReport,
@@ -1165,24 +1197,40 @@ app.post("/api/change-password", (req, res) => {
   });
 });
 app.get("/api/credit", async (_req, res) => {
-  const token = process.env.APIFY_TOKEN;
-  if (!token) {
+  const tokens = getTokens();
+  if (!tokens.length) {
     res.json({ configured: false });
     return;
   }
   try {
-    const r = await fetch(`https://api.apify.com/v2/users/me/limits?token=${encodeURIComponent(token)}`, {
-      signal: AbortSignal.timeout(1e4)
-    });
-    if (!r.ok) throw new Error(`Apify limits ${r.status}`);
-    const d = await r.json();
-    const used = Number(d?.data?.current?.monthlyUsageUsd ?? 0);
-    const cap = Number(d?.data?.limits?.maxMonthlyUsageUsd ?? 0);
+    const perAccount = await Promise.all(
+      tokens.map(async (token) => {
+        try {
+          const r = await fetch(
+            `https://api.apify.com/v2/users/me/limits?token=${encodeURIComponent(token)}`,
+            { signal: AbortSignal.timeout(1e4) }
+          );
+          if (!r.ok) return null;
+          const d = await r.json();
+          const used2 = Number(d?.data?.current?.monthlyUsageUsd ?? 0);
+          const cap2 = Number(d?.data?.limits?.maxMonthlyUsageUsd ?? 0);
+          return { used: used2, cap: cap2 };
+        } catch {
+          return null;
+        }
+      })
+    );
+    const ok = perAccount.filter((a) => a != null);
+    if (!ok.length) throw new Error("no account limits available");
+    const used = ok.reduce((s, a) => s + a.used, 0);
+    const cap = ok.reduce((s, a) => s + a.cap, 0);
+    const exhausted = ok.every((a) => a.cap > 0 && a.used >= a.cap);
     res.json({
       configured: true,
       usedUsd: Math.round(used * 100) / 100,
       capUsd: cap || null,
-      exhausted: cap > 0 && used >= cap
+      exhausted,
+      accounts: ok.length
     });
   } catch (error) {
     res.json({ configured: true, unknown: true, error: String(error?.message || error) });
@@ -1201,7 +1249,7 @@ app.get("/api/sources/:source", async (req, res) => {
     res.status(400).json({ error: "\u05D7\u05E1\u05E8\u05D4 \u05E2\u05D9\u05E8" });
     return;
   }
-  if (!process.env.APIFY_TOKEN && !cacheOnly) {
+  if (!getTokens().length && !cacheOnly) {
     res.status(503).json({ error: "APIFY_TOKEN \u05DC\u05D0 \u05DE\u05D5\u05D2\u05D3\u05E8 \u05D1\u05E9\u05E8\u05EA" });
     return;
   }
@@ -1237,7 +1285,8 @@ app.get("/api/health", (req, res) => {
     status: "ok",
     time: (/* @__PURE__ */ new Date()).toISOString(),
     hasApiKey: !!process.env.GEMINI_API_KEY,
-    hasApifyToken: !!process.env.APIFY_TOKEN
+    hasApifyToken: getTokens().length > 0,
+    apifyAccounts: getTokens().length
   });
 });
 async function setupVite() {
