@@ -135,6 +135,36 @@ export class CacheMissError extends Error {
 }
 
 /**
+ * רוטציית חשבונות Apify: אוסף את כל הטוקנים המוגדרים, וכשאחד מוצה את
+ * הקרדיט החינמי שלו (402 / מגבלת שימוש) עובר אוטומטית לבא. כך אפשר לצבור
+ * את הקרדיט החינמי של כמה חשבונות (למשל 4×$5 = $20 בחודש).
+ *
+ * מקורות הטוקנים (לפי סדר עדיפות): APIFY_TOKENS (מופרד בפסיקים),
+ * APIFY_TOKEN, ואז APIFY_TOKEN_2 ... APIFY_TOKEN_8.
+ */
+export function getTokens(): string[] {
+  const list: string[] = [];
+  if (process.env.APIFY_TOKENS) {
+    list.push(...process.env.APIFY_TOKENS.split(",").map((t) => t.trim()).filter(Boolean));
+  }
+  if (process.env.APIFY_TOKEN) list.push(process.env.APIFY_TOKEN.trim());
+  for (let i = 2; i <= 8; i++) {
+    const t = process.env[`APIFY_TOKEN_${i}`];
+    if (t && t.trim()) list.push(t.trim());
+  }
+  return [...new Set(list)]; // דה-דופ תוך שמירת הסדר
+}
+
+/** טוקנים שסומנו כמוצו (בזיכרון). מתאפס באתחול השרת ובתחילת מחזור החיוב. */
+const exhaustedTokens = new Set<string>();
+
+/** מזהה תשובת "נגמר הקרדיט/מגבלת שימוש" של Apify (402/403 או הודעה מתאימה). */
+function isQuotaError(status: number, body: string): boolean {
+  if (status === 402 || status === 403) return true;
+  return /usage|limit|exceeded|quota|payment|insufficient/i.test(body);
+}
+
+/**
  * מריץ אקטור וממתין לתוצאות.
  * cacheOnly=true מחזיר רק מהמטמון ולעולם לא פונה ל-Apify — כך שכשנגמר
  * הקרדיט עדיין אפשר להציג את מה שכבר נשאב, במקום מסך ריק.
@@ -145,8 +175,8 @@ async function runActor(
   timeoutMs = 240000,
   cacheOnly = false,
 ): Promise<any[]> {
-  const token = process.env.APIFY_TOKEN;
-  if (!token && !cacheOnly) throw new Error("APIFY_TOKEN חסר בקובץ .env");
+  const allTokens = getTokens();
+  if (!allTokens.length && !cacheOnly) throw new Error("אין טוקן Apify מוגדר (APIFY_TOKEN)");
 
   const cacheKey = `${actor}|${JSON.stringify(input)}`;
   const cached = resultCache.get(cacheKey);
@@ -169,39 +199,61 @@ async function runActor(
 
   if (cacheOnly) throw new CacheMissError(actor);
 
-  const url = `${APIFY_BASE}/${actor}/run-sync-get-dataset-items?token=${encodeURIComponent(token)}`;
+  // רוטציה: מנסים טוקנים לפי הסדר, מדלגים על אלה שכבר סומנו כמוצו.
+  const tokens = allTokens.filter((t) => !exhaustedTokens.has(t));
+  if (!tokens.length) {
+    throw new Error("כל חשבונות Apify מיצו את הקרדיט החודשי. יתחדש בתחילת החודש הבא.");
+  }
 
-  // ה-DNS של api.apify.com מחזיר כמה כתובות ולא כולן מגיבות, מה שמייצר
-  // UND_ERR_CONNECT_TIMEOUT אקראי. ניסיון חוזר בוחר כתובת אחרת ופותר את זה.
-  let res: Response | null = null;
+  let data: any = null;
   let lastErr: any = null;
-  for (let attempt = 1; attempt <= 3; attempt++) {
-    try {
-      res = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(input),
-        signal: AbortSignal.timeout(timeoutMs),
-      });
-      break;
-    } catch (err: any) {
-      lastErr = err;
-      // חריגה מהתקציב הכולל אינה תקלת רשת חולפת — אין טעם לנסות שוב.
-      if (err?.name === "TimeoutError") break;
-      if (attempt < 3) await new Promise((r) => setTimeout(r, attempt * 1000));
+
+  for (const token of tokens) {
+    const url = `${APIFY_BASE}/${actor}/run-sync-get-dataset-items?token=${encodeURIComponent(token)}`;
+    const tag = `...${token.slice(-4)}`;
+
+    // ה-DNS של api.apify.com מחזיר כמה כתובות ולא כולן מגיבות, מה שמייצר
+    // UND_ERR_CONNECT_TIMEOUT אקראי. ניסיון חוזר בוחר כתובת אחרת ופותר את זה.
+    let res: Response | null = null;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        res = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(input),
+          signal: AbortSignal.timeout(timeoutMs),
+        });
+        break;
+      } catch (err: any) {
+        lastErr = err;
+        if (err?.name === "TimeoutError") break;
+        if (attempt < 3) await new Promise((r) => setTimeout(r, attempt * 1000));
+      }
     }
+    if (!res) continue; // תקלת רשת בטוקן הזה — מנסים את הבא
+
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      if (isQuotaError(res.status, body)) {
+        // החשבון מיצה את הקרדיט — מסמנים ועוברים אוטומטית לחשבון הבא.
+        exhaustedTokens.add(token);
+        console.log(`[apify] חשבון ${tag} מוצה (${res.status}) — עובר לחשבון הבא`);
+        continue;
+      }
+      lastErr = new Error(`Apify ${actor} החזיר ${res.status}: ${body.slice(0, 200)}`);
+      continue; // שגיאה אחרת — ננסה חשבון אחר לפני שנכשל
+    }
+
+    data = await res.json();
+    console.log(`[apify] חויב על חשבון ${tag}: ${actor}`);
+    break;
   }
-  if (!res) {
-    const cause = lastErr?.cause?.code || lastErr?.cause?.message || lastErr?.cause || "";
-    throw new Error(
-      `חיבור ל-Apify נכשל (${actor}): ${lastErr?.name || ""} ${lastErr?.message || ""} ${cause}`.trim(),
-    );
+
+  if (data == null) {
+    const cause = lastErr?.cause?.code || lastErr?.message || "כל החשבונות מוצו/נכשלו";
+    throw new Error(`חיבור ל-Apify נכשל (${actor}): ${cause}`.trim());
   }
-  if (!res.ok) {
-    const body = await res.text().catch(() => "");
-    throw new Error(`Apify ${actor} החזיר ${res.status}: ${body.slice(0, 200)}`);
-  }
-  const data = await res.json();
+
   const rows = (Array.isArray(data) ? data : []).map(stripPersonalData);
 
   // שומרים גם תוצאה ריקה: אם המקור לא מכסה את העיר, אין טעם לשלם על

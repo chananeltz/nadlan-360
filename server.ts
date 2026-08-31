@@ -5,7 +5,7 @@ import * as xlsx from "xlsx";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI } from "@google/genai";
 import dotenv from "dotenv";
-import { fetchYad2, fetchYad1, fetchMadlan, fetchFacebook, CacheMissError } from "./apifySources";
+import { fetchYad2, fetchYad1, fetchMadlan, fetchFacebook, CacheMissError, getTokens } from "./apifySources";
 import { verifyCredentials, changePassword, currentUser, isUsingDefaultPassword } from "./serverAuth";
 
 // Load environment variables
@@ -807,24 +807,46 @@ app.post("/api/change-password", (req, res) => {
  * למשתמש *למה* המקורות חסרים ומתי הם יחזרו.
  */
 app.get("/api/credit", async (_req, res) => {
-  const token = process.env.APIFY_TOKEN;
-  if (!token) {
+  const tokens = getTokens();
+  if (!tokens.length) {
     res.json({ configured: false });
     return;
   }
   try {
-    const r = await fetch(`https://api.apify.com/v2/users/me/limits?token=${encodeURIComponent(token)}`, {
-      signal: AbortSignal.timeout(10000),
-    });
-    if (!r.ok) throw new Error(`Apify limits ${r.status}`);
-    const d = await r.json();
-    const used = Number(d?.data?.current?.monthlyUsageUsd ?? 0);
-    const cap = Number(d?.data?.limits?.maxMonthlyUsageUsd ?? 0);
+    // סוכמים את היתרה של כל החשבונות יחד (רוטציה) — כך היתרה שמוצגת
+    // והחישוב "כמה חיפושים נשארו" משקפים את הסכום הכולל (למשל 4×$5=$20).
+    const perAccount = await Promise.all(
+      tokens.map(async (token) => {
+        try {
+          const r = await fetch(
+            `https://api.apify.com/v2/users/me/limits?token=${encodeURIComponent(token)}`,
+            { signal: AbortSignal.timeout(10000) },
+          );
+          if (!r.ok) return null;
+          const d = await r.json();
+          const used = Number(d?.data?.current?.monthlyUsageUsd ?? 0);
+          const cap = Number(d?.data?.limits?.maxMonthlyUsageUsd ?? 0);
+          return { used, cap };
+        } catch {
+          return null;
+        }
+      }),
+    );
+
+    const ok = perAccount.filter((a): a is { used: number; cap: number } => a != null);
+    if (!ok.length) throw new Error("no account limits available");
+
+    const used = ok.reduce((s, a) => s + a.used, 0);
+    const cap = ok.reduce((s, a) => s + a.cap, 0);
+    // מוצה רק כשכל החשבונות מוצו (בכל אחד used>=cap שלו).
+    const exhausted = ok.every((a) => a.cap > 0 && a.used >= a.cap);
+
     res.json({
       configured: true,
       usedUsd: Math.round(used * 100) / 100,
       capUsd: cap || null,
-      exhausted: cap > 0 && used >= cap,
+      exhausted,
+      accounts: ok.length,
     });
   } catch (error: any) {
     // כשלון בבדיקת הקרדיט אינו אמור להפיל את המסך — מדווחים ולא חוסמים.
@@ -856,7 +878,7 @@ app.get("/api/sources/:source", async (req, res) => {
     res.status(400).json({ error: "חסרה עיר" });
     return;
   }
-  if (!process.env.APIFY_TOKEN && !cacheOnly) {
+  if (!getTokens().length && !cacheOnly) {
     res.status(503).json({ error: "APIFY_TOKEN לא מוגדר בשרת" });
     return;
   }
@@ -896,7 +918,8 @@ app.get("/api/health", (req, res) => {
     status: "ok",
     time: new Date().toISOString(),
     hasApiKey: !!process.env.GEMINI_API_KEY,
-    hasApifyToken: !!process.env.APIFY_TOKEN,
+    hasApifyToken: getTokens().length > 0,
+    apifyAccounts: getTokens().length,
   });
 });
 

@@ -18,6 +18,14 @@ services:
       # https://console.apify.com/settings/integrations
       - key: APIFY_TOKEN
         sync: false
+      # רוטציית חשבונות: כשהקרדיט של אחד נגמר, השרת עובר אוטומטית לבא.
+      # מזינים טוקן מכל חשבון Apify נוסף (חינם, $5 לכל אחד). אופציונלי.
+      - key: APIFY_TOKEN_2
+        sync: false
+      - key: APIFY_TOKEN_3
+        sync: false
+      - key: APIFY_TOKEN_4
+        sync: false
       # פרטי הכניסה ההתחלתיים. שינוי כאן = איפוס סיסמה למצב התחלתי.
       - key: AUTH_USER
         sync: false
