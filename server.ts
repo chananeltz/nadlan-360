@@ -6,6 +6,7 @@ import { createServer as createViteServer } from "vite";
 import { GoogleGenAI } from "@google/genai";
 import dotenv from "dotenv";
 import { fetchYad2, fetchYad1, fetchMadlan, fetchFacebook, CacheMissError, getTokens } from "./apifySources";
+import { isGithubStoreEnabled } from "./githubStore";
 import { verifyCredentials, changePassword, currentUser, isUsingDefaultPassword } from "./serverAuth";
 
 // Load environment variables
@@ -920,6 +921,7 @@ app.get("/api/health", (req, res) => {
     hasApiKey: !!process.env.GEMINI_API_KEY,
     hasApifyToken: getTokens().length > 0,
     apifyAccounts: getTokens().length,
+    hasGithubStore: isGithubStoreEnabled(),
   });
 });
 
